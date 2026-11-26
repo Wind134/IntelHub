@@ -36,6 +36,7 @@ type IntelEvent struct {
 	PushStatus         string   `json:"push_status"`         // pushed | cooled_down | digested | silent_baseline | archived
 	VerificationStatus string   `json:"verification_status"` // none | pending | confirmed | unverified | contradicted
 	VerificationNote   string   `json:"verification_note"`
+	FeishuMessageID    string   `json:"feishu_message_id,omitempty"`
 	PublishedAt        int64    `json:"published_at"`
 	CreatedAt          int64    `json:"created_at"`
 	UpdatedAt          int64    `json:"updated_at"`

@@ -398,8 +398,10 @@ func runTestPush(args []string) {
 	}
 	feishu := notifier.NewFeishuNotifier(cfg.Notify)
 	if feishu.Enabled() {
-		if err := feishu.SendEventCard(ctx, ev); err != nil {
+		if msgID, err := feishu.SendEventCard(ctx, ev); err != nil {
 			log.Printf("[feishu] error: %v", err)
+		} else if msgID != "" {
+			_ = st.SetFeishuMessageID(ctx, ev.ID, msgID)
 		}
 	}
 	mustJSON(ev, nil)

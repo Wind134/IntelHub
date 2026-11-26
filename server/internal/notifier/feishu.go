@@ -43,13 +43,13 @@ func (f *FeishuNotifier) Enabled() bool {
 		(strings.TrimSpace(f.cfg.FeishuAppID) != "" && strings.TrimSpace(f.cfg.FeishuAppSecret) != "" && strings.TrimSpace(f.cfg.FeishuChatID) != "")
 }
 
-func (f *FeishuNotifier) SendEventCard(ctx context.Context, ev *model.IntelEvent) error {
+func (f *FeishuNotifier) SendEventCard(ctx context.Context, ev *model.IntelEvent) (string, error) {
 	if !f.Enabled() {
-		return nil
+		return "", nil
 	}
 	card := buildFeishuCard(ev)
 	if strings.TrimSpace(f.cfg.FeishuWebhook) != "" {
-		return f.sendWebhook(ctx, card)
+		return "", f.sendWebhook(ctx, card)
 	}
 	return f.sendAppMessage(ctx, card)
 }
@@ -62,7 +62,7 @@ func (f *FeishuNotifier) SendVerificationUpdate(ctx context.Context, ev *model.I
 	if ev.VerificationStatus == "confirmed" {
 		badge = "✅ 权威信源已交叉印证"
 	}
-	card := map[string]any{
+	verifyCard := map[string]any{
 		"config": map[string]any{"wide_screen_mode": true},
 		"header": map[string]any{
 			"template": "blue",
@@ -74,14 +74,27 @@ func (f *FeishuNotifier) SendVerificationUpdate(ctx context.Context, ev *model.I
 		"elements": []any{
 			map[string]any{
 				"tag":     "markdown",
-				"content": fmt.Sprintf("**原事件**：%s\n**核验结论**：%s", ev.ZhTitle, ev.VerificationNote),
+				"content": fmt.Sprintf("**核验结论**\n%s", ev.VerificationNote),
 			},
 		},
 	}
+
 	if strings.TrimSpace(f.cfg.FeishuWebhook) != "" {
-		return f.sendWebhook(ctx, card)
+		return f.sendWebhook(ctx, verifyCard)
 	}
-	return f.sendAppMessage(ctx, card)
+
+	// Prefer attaching inside the original message's thread (话题回复) so main chat stays clean.
+	// If the chat is a 1-on-1 DM where reply_in_thread is unsupported, seamlessly PATCH the original card in-place!
+	if strings.TrimSpace(ev.FeishuMessageID) != "" {
+		if err := f.replyInThread(ctx, ev.FeishuMessageID, verifyCard); err == nil {
+			return nil
+		}
+		if err := f.patchAppCard(ctx, ev.FeishuMessageID, buildFeishuCard(ev)); err == nil {
+			return nil
+		}
+	}
+	_, err := f.sendAppMessage(ctx, verifyCard)
+	return err
 }
 
 func buildFeishuCard(ev *model.IntelEvent) map[string]any {
@@ -100,6 +113,13 @@ func buildFeishuCard(ev *model.IntelEvent) map[string]any {
 	}
 	if strings.TrimSpace(ev.Summary) != "" {
 		sections = append(sections, fmt.Sprintf("**事件摘要**\n%s", truncateRunes(strings.TrimSpace(ev.Summary), 260)))
+	}
+	if strings.TrimSpace(ev.VerificationNote) != "" {
+		vTitle := "**🔍 多源核验补充**"
+		if ev.VerificationStatus == "confirmed" {
+			vTitle = "**✅ 权威信源已交叉印证**"
+		}
+		sections = append(sections, fmt.Sprintf("%s\n%s", vTitle, strings.TrimSpace(ev.VerificationNote)))
 	}
 	metaLines := []string{
 		"**情报元信息**",
@@ -176,10 +196,10 @@ func (f *FeishuNotifier) sendWebhook(ctx context.Context, card map[string]any) e
 	return nil
 }
 
-func (f *FeishuNotifier) sendAppMessage(ctx context.Context, card map[string]any) error {
+func (f *FeishuNotifier) sendAppMessage(ctx context.Context, card map[string]any) (string, error) {
 	token, err := f.getTenantToken(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	cardJSON, _ := json.Marshal(card)
 	body, _ := json.Marshal(map[string]any{
@@ -188,6 +208,49 @@ func (f *FeishuNotifier) sendAppMessage(ctx context.Context, card map[string]any
 		"content":    string(cardJSON),
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := f.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("feishu app im http %d: %s", resp.StatusCode, string(raw))
+	}
+	var parsed struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			MessageID string `json:"message_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err == nil {
+		if parsed.Code != 0 {
+			return "", fmt.Errorf("feishu app im code %d: %s", parsed.Code, parsed.Msg)
+		}
+		return parsed.Data.MessageID, nil
+	}
+	return "", nil
+}
+
+func (f *FeishuNotifier) replyInThread(ctx context.Context, messageID string, card map[string]any) error {
+	token, err := f.getTenantToken(ctx)
+	if err != nil {
+		return err
+	}
+	cardJSON, _ := json.Marshal(card)
+	body, _ := json.Marshal(map[string]any{
+		"msg_type":        "interactive",
+		"content":         string(cardJSON),
+		"reply_in_thread": true,
+	})
+	endpoint := fmt.Sprintf("https://open.feishu.cn/open-apis/im/v1/messages/%s/reply", messageID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -198,9 +261,51 @@ func (f *FeishuNotifier) sendAppMessage(ctx context.Context, card map[string]any
 		return err
 	}
 	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	if resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return fmt.Errorf("feishu app im http %d: %s", resp.StatusCode, string(raw))
+		return fmt.Errorf("feishu reply http %d: %s", resp.StatusCode, string(raw))
+	}
+	var parsed struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err == nil && parsed.Code != 0 {
+		return fmt.Errorf("feishu reply code %d: %s", parsed.Code, parsed.Msg)
+	}
+	return nil
+}
+
+func (f *FeishuNotifier) patchAppCard(ctx context.Context, messageID string, card map[string]any) error {
+	token, err := f.getTenantToken(ctx)
+	if err != nil {
+		return err
+	}
+	cardJSON, _ := json.Marshal(card)
+	body, _ := json.Marshal(map[string]any{
+		"content": string(cardJSON),
+	})
+	endpoint := fmt.Sprintf("https://open.feishu.cn/open-apis/im/v1/messages/%s", messageID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := f.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("feishu patch http %d: %s", resp.StatusCode, string(raw))
+	}
+	var parsed struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err == nil && parsed.Code != 0 {
+		return fmt.Errorf("feishu patch code %d: %s", parsed.Code, parsed.Msg)
 	}
 	return nil
 }

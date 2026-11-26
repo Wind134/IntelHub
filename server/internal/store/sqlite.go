@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS intel_events (
     push_status         TEXT NOT NULL,
     verification_status TEXT NOT NULL DEFAULT 'none',
     verification_note   TEXT NOT NULL DEFAULT '',
+    feishu_message_id   TEXT NOT NULL DEFAULT '',
     search_tokens       TEXT NOT NULL DEFAULT '',
     published_at        INTEGER NOT NULL,
     created_at          INTEGER NOT NULL,
@@ -269,8 +270,12 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at INTEGER NOT NULL
 );
 `
-	_, err := s.writeDB.Exec(schema)
-	return err
+	if _, err := s.writeDB.Exec(schema); err != nil {
+		return err
+	}
+	// Safe additive column migration for existing databases
+	_, _ = s.writeDB.Exec(`ALTER TABLE intel_events ADD COLUMN feishu_message_id TEXT NOT NULL DEFAULT ''`)
+	return nil
 }
 
 func simhashBands(h uint64) (int64, int64, int64, int64) {
@@ -479,6 +484,19 @@ func (s *Store) UpdateEventVerification(ctx context.Context, eventID int64, stat
 	return s.GetEventByID(ctx, eventID)
 }
 
+// SetFeishuMessageID records the Feishu message_id returned when sending the original P1 alert card.
+func (s *Store) SetFeishuMessageID(ctx context.Context, eventID int64, messageID string) error {
+	if messageID == "" {
+		return nil
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err := s.writeDB.ExecContext(ctx, `
+		UPDATE intel_events SET feishu_message_id = ?, updated_at = ? WHERE id = ?
+	`, messageID, time.Now().Unix(), eventID)
+	return err
+}
+
 // SetBookmark updates bookmark status and user note for a historical event.
 func (s *Store) SetBookmark(ctx context.Context, eventCode string, bookmarked bool, userNote *string) (*model.IntelEvent, error) {
 	s.writeMu.Lock()
@@ -513,7 +531,7 @@ const selectEventCols = `
 SELECT e.id, e.event_code, e.source_name, e.category, e.raw_title, e.zh_title, e.summary,
        e.impact_analysis, e.canonical_url, e.entities_json, e.quote_snapshot_json,
        e.score, e.tier, e.is_bookmarked, e.user_note, e.push_status,
-       e.verification_status, e.verification_note, e.published_at, e.created_at, e.updated_at`
+       e.verification_status, e.verification_note, e.feishu_message_id, e.published_at, e.created_at, e.updated_at`
 
 // ListEvents performs cursor-based or multi-faceted historical queries across the full archive.
 func (s *Store) ListEvents(ctx context.Context, f model.EventFilter) ([]model.IntelEvent, error) {
@@ -1055,14 +1073,14 @@ func scanEvent(r rowScanner, hasSnippet bool) (*model.IntelEvent, error) {
 			&ev.ID, &ev.EventCode, &ev.SourceName, &ev.Category, &ev.RawTitle, &ev.ZhTitle, &ev.Summary,
 			&ev.ImpactAnalysis, &ev.CanonicalURL, &entitiesRaw, &ev.QuoteSnapshot,
 			&ev.Score, &ev.Tier, &bookmarked, &ev.UserNote, &ev.PushStatus,
-			&ev.VerificationStatus, &ev.VerificationNote, &ev.PublishedAt, &ev.CreatedAt, &ev.UpdatedAt, &ev.Snippet,
+			&ev.VerificationStatus, &ev.VerificationNote, &ev.FeishuMessageID, &ev.PublishedAt, &ev.CreatedAt, &ev.UpdatedAt, &ev.Snippet,
 		)
 	} else {
 		err = r.Scan(
 			&ev.ID, &ev.EventCode, &ev.SourceName, &ev.Category, &ev.RawTitle, &ev.ZhTitle, &ev.Summary,
 			&ev.ImpactAnalysis, &ev.CanonicalURL, &entitiesRaw, &ev.QuoteSnapshot,
 			&ev.Score, &ev.Tier, &bookmarked, &ev.UserNote, &ev.PushStatus,
-			&ev.VerificationStatus, &ev.VerificationNote, &ev.PublishedAt, &ev.CreatedAt, &ev.UpdatedAt,
+			&ev.VerificationStatus, &ev.VerificationNote, &ev.FeishuMessageID, &ev.PublishedAt, &ev.CreatedAt, &ev.UpdatedAt,
 		)
 	}
 	if err != nil {

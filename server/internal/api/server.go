@@ -55,13 +55,18 @@ func (s *Server) OnEventCreated(ctx context.Context, ev *model.IntelEvent) {
 		return
 	}
 
-	// Feishu notification
+	// Feishu notification (capture returned message_id so 9+ verification replies inside its thread or patches in-place)
 	if ev.Score >= s.cfg.Notify.FeishuMinScore && s.feishu != nil && s.feishu.Enabled() {
 		go func(e model.IntelEvent) {
 			nctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			if err := s.feishu.SendEventCard(nctx, &e); err != nil {
+			msgID, err := s.feishu.SendEventCard(nctx, &e)
+			if err != nil {
 				log.Printf("[feishu] send failed: %v", err)
+				return
+			}
+			if msgID != "" {
+				_ = s.store.SetFeishuMessageID(nctx, e.ID, msgID)
 			}
 		}(*ev)
 	}
