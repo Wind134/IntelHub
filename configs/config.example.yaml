@@ -1,0 +1,342 @@
+server:
+  listen_addr: "127.0.0.1:8787"
+  db_path: "~/.hermes/intel/intel_hub.db"
+  backup_dir: "~/.hermes/intel/backups"
+  backup_remote: "backup-server:~/backups/intel-hub/"
+  # api_token 建议通过环境变量 INTEL_API_TOKEN 注入，切勿明文提交到仓库
+  api_token: ""
+  public_url: "https://intel.example.com"
+
+budget:
+  monthly_cap_usd: 2.80
+  twitter_cap_usd: 2.50
+
+llm:
+  # 默认复用主服务器 ~/.hermes/.env 中的 OPENCODE_GO_API_KEY
+  base_url: "https://opencode.ai/zen/go/v1"
+  fast_model: "deepseek-v4.1-flash"
+  fallback_model: "qwen3.8-flash"
+  strong_model: "deepseek-v4-pro"
+  timeout_sec: 25
+
+search:
+  # 通过环境变量 BRAVE_API_KEY / TAVILY_API_KEY 注入（免费额度 $0）
+  brave_api_key: ""
+  tavily_api_key: ""
+
+twitter_api:
+  # 在 ~/.hermes/intel/.env 设置 TWITTERAPI_IO_KEY 后自动启用
+  enabled: false
+  active_interval_sec: 120
+  quiet_interval_sec: 300
+  accounts:
+    - "OpenAI"
+    - "AnthropicAI"
+    - "GoogleDeepMind"
+    - "deepseek_ai"
+    - "Alibaba_Qwen"
+    - "sama"
+    - "karpathy"
+    - "elonmusk"
+    - "WalterBloomberg"
+    - "DeItaone"
+    - "ReutersTech"
+    - "CNBCnow"
+
+finnhub:
+  # 在 ~/.hermes/intel/.env 设置 FINNHUB_API_KEY 后自动启用（免费额度 $0）
+  enabled: false
+  symbols:
+    - "NVDA"
+    - "AAPL"
+    - "MSFT"
+    - "GOOGL"
+    - "META"
+    - "AMZN"
+    - "TSLA"
+    - "TSM"
+    - "AVGO"
+    - "AMD"
+    - "ASML"
+    - "ARM"
+    - "PLTR"
+    - "QQQ"
+    - "SPY"
+    - "SOXX"
+  etf_symbols: ["QQQ", "SPY", "SOXX"]
+  window_minutes: 5
+  stock_threshold_pct: 3.5
+  etf_threshold_pct: 1.5
+  news_interval_sec: 120
+
+filters:
+  min_text_length: 15
+  simhash_threshold: 3
+  cooldown_minutes: 30
+  exclude_keywords:
+    - "生活"
+    - "生活方式"
+    - "健康"
+    - "养生"
+    - "美食"
+    - "食谱"
+    - "旅行"
+    - "旅游"
+    - "穿搭"
+    - "时尚"
+    - "美容"
+    - "护肤"
+    - "减肥"
+    - "健身"
+    - "育儿"
+    - "宠物"
+    - "星座"
+    - "情感"
+    - "家居"
+    - "综艺"
+    - "明星"
+    - "娱乐"
+    - "八卦"
+    - "电影"
+    - "电视剧"
+    - "音乐"
+    - "体育"
+    - "足球"
+    - "篮球"
+    - "抽奖"
+    - "广告"
+    - "早报汇总"
+    - "南方财经"
+    - "南方财经全媒体集团"
+    - "21财经"
+    - "证券之星"
+    - "lifestyle"
+    - "wellness"
+    - "recipe"
+    - "travel"
+    - "fashion"
+    - "celebrity"
+    - "entertainment"
+    - "sports"
+
+notify:
+  feishu_min_score: 8
+  weixin_p1_mirror: false
+
+feeds:
+  # === 高频免费实时快讯与官方状态页 ===
+  - name: "wscn-global"
+    label: "华尔街见闻7x24"
+    type: "wscn_lives"
+    category: "finance"
+    url: "https://api-one-wscn.awtmt.com/apiv1/content/lives?channel=global-channel&limit=25"
+    interval_sec: 60
+    enabled: true
+
+  - name: "openai-status"
+    label: "OpenAI Status"
+    type: "status_atom"
+    category: "ai"
+    url: "https://status.openai.com/history.atom"
+    interval_sec: 90
+    enabled: true
+    bypass_rules: true
+
+  - name: "anthropic-status"
+    label: "Anthropic Status"
+    type: "status_atom"
+    category: "ai"
+    url: "https://status.anthropic.com/history.atom"
+    interval_sec: 90
+    enabled: true
+    bypass_rules: true
+
+  - name: "cloudflare-status"
+    label: "Cloudflare Status"
+    type: "status_atom"
+    category: "world"
+    url: "https://www.cloudflarestatus.com/history.atom"
+    interval_sec: 120
+    enabled: true
+    bypass_rules: true
+
+  - name: "github-status"
+    label: "GitHub Status"
+    type: "status_atom"
+    category: "bigtech"
+    url: "https://www.githubstatus.com/history.atom"
+    interval_sec: 120
+    enabled: true
+    bypass_rules: true
+
+  - name: "cisa-kev"
+    label: "CISA 零日漏洞目录"
+    type: "cisa_kev"
+    category: "world"
+    url: "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+    interval_sec: 900
+    enabled: true
+    bypass_rules: true
+
+  - name: "usgs-m6"
+    label: "USGS 6级以上强震"
+    type: "rss"
+    category: "world"
+    url: "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/significant_day.atom"
+    interval_sec: 300
+    enabled: true
+    bypass_rules: true
+
+  # === 精选已验证 17 个中英文科技与财经 RSS 源 ===
+  - name: "cnbc-markets"
+    label: "CNBC Markets"
+    type: "rss"
+    category: "finance"
+    url: "https://www.cnbc.com/id/100003114/device/rss/rss.html"
+    interval_sec: 180
+    enabled: true
+
+  - name: "wsj-markets"
+    label: "WSJ Markets"
+    type: "rss"
+    category: "finance"
+    url: "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"
+    interval_sec: 180
+    enabled: true
+
+  - name: "hn"
+    label: "Hacker News"
+    type: "rss"
+    category: "ai"
+    url: "https://news.ycombinator.com/rss"
+    interval_sec: 300
+    enabled: true
+
+  - name: "theverge"
+    label: "The Verge"
+    type: "rss"
+    category: "bigtech"
+    url: "https://www.theverge.com/rss/index.xml"
+    interval_sec: 300
+    enabled: true
+
+  - name: "arstechnica"
+    label: "Ars Technica"
+    type: "rss"
+    category: "bigtech"
+    url: "https://feeds.arstechnica.com/arstechnica/index"
+    interval_sec: 300
+    enabled: true
+
+  - name: "theregister"
+    label: "The Register"
+    type: "rss"
+    category: "bigtech"
+    url: "https://www.theregister.com/headlines.atom"
+    interval_sec: 300
+    enabled: true
+
+  - name: "ithome"
+    label: "IT之家"
+    type: "rss"
+    category: "bigtech"
+    url: "https://www.ithome.com/rss/"
+    interval_sec: 240
+    enabled: true
+
+  - name: "solidot"
+    label: "Solidot"
+    type: "rss"
+    category: "bigtech"
+    url: "https://www.solidot.org/index.rss"
+    interval_sec: 300
+    enabled: true
+
+  - name: "geekpark"
+    label: "极客公园"
+    type: "rss"
+    category: "bigtech"
+    url: "https://www.geekpark.net/rss"
+    interval_sec: 300
+    enabled: true
+
+  - name: "36kr"
+    label: "36氪"
+    type: "rss"
+    category: "bigtech"
+    url: "https://www.36kr.com/feed"
+    interval_sec: 240
+    enabled: true
+
+  - name: "huxiu"
+    label: "虎嗅"
+    type: "rss"
+    category: "bigtech"
+    url: "https://rss.huxiu.com/"
+    interval_sec: 300
+    enabled: true
+
+  - name: "tmtpost"
+    label: "钛媒体"
+    type: "rss"
+    category: "finance"
+    url: "https://www.tmtpost.com/rss"
+    interval_sec: 300
+    enabled: true
+
+  - name: "ifanr"
+    label: "爱范儿"
+    type: "rss"
+    category: "bigtech"
+    url: "https://www.ifanr.com/feed"
+    interval_sec: 300
+    enabled: true
+
+  - name: "qbitai"
+    label: "量子位"
+    type: "rss"
+    category: "ai"
+    url: "https://www.qbitai.com/feed"
+    interval_sec: 240
+    enabled: true
+
+  - name: "leiphone"
+    label: "雷锋网"
+    type: "rss"
+    category: "ai"
+    url: "https://www.leiphone.com/feed"
+    interval_sec: 300
+    enabled: true
+
+  - name: "oschina"
+    label: "开源中国"
+    type: "rss"
+    category: "bigtech"
+    url: "https://www.oschina.net/news/rss"
+    interval_sec: 300
+    enabled: true
+
+  - name: "infoq-cn"
+    label: "InfoQ中文"
+    type: "rss"
+    category: "bigtech"
+    url: "https://www.infoq.cn/feed"
+    interval_sec: 300
+    enabled: true
+
+  - name: "bbc-zh"
+    label: "BBC中文"
+    type: "rss"
+    category: "world"
+    url: "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml"
+    interval_sec: 300
+    enabled: true
+    traditional_zh: true
+
+  - name: "wsj-world"
+    label: "WSJ World"
+    type: "rss"
+    category: "world"
+    url: "https://feeds.a.dj.com/rss/RSSWorldNews.xml"
+    interval_sec: 300
+    enabled: true

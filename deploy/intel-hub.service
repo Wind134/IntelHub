@@ -1,0 +1,18 @@
+[Unit]
+Description=IntelHub Real-Time Intelligence & Historical Archive Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.hermes/.env
+EnvironmentFile=-%h/.hermes/intel/.env
+ExecStart=%h/.local/bin/intel-hub serve --config %h/.hermes/intel/config.yaml
+Restart=always
+RestartSec=5
+MemoryMax=128M
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

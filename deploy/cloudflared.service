@@ -1,0 +1,17 @@
+[Unit]
+Description=Cloudflare Tunnel for IntelHub (Zero Inbound Ports)
+After=network-online.target intel-hub.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.hermes/intel/.env
+ExecStart=%h/.local/bin/cloudflared tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+Restart=always
+RestartSec=5
+MemoryMax=64M
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

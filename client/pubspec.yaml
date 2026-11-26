@@ -1,0 +1,31 @@
+name: intel_hub_client
+description: "全天候多领域突发情报终端 (Windows & Android 原生通知 + 全量历史检索 + AI 深度溯源)"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.2
+  web_socket_channel: ^3.0.1
+  shared_preferences: ^2.3.3
+  intl: ^0.20.1
+  url_launcher: ^6.3.1
+  flutter_local_notifications: ^18.0.1
+  local_notifier: ^0.1.6
+  window_manager: ^0.4.3
+  flutter_markdown_plus: ^1.0.5
+
+  material_ui: any
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/app_icon_squircle.png

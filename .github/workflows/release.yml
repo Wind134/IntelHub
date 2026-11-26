@@ -1,0 +1,135 @@
+name: Release Multi-Platform Builds
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag version (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.version }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VER="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+  build-server-linux:
+    needs: meta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: server/go.sum
+      - name: Test & Build Static Linux Server
+        working-directory: server
+        run: |
+          go test ./...
+          mkdir -p ../artifacts
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
+            -o "../artifacts/intel-hub-${{ needs.meta.outputs.tag }}-linux-amd64" ./cmd/intel-hub
+          sha256sum "../artifacts/intel-hub-${{ needs.meta.outputs.tag }}-linux-amd64" \
+            > "../artifacts/intel-hub-${{ needs.meta.outputs.tag }}-linux-amd64.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-linux
+          path: artifacts/*
+
+  build-windows:
+    needs: meta
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Build Flutter Windows Release
+        working-directory: client
+        shell: pwsh
+        run: |
+          flutter pub get
+          flutter build windows --release `
+            --build-name="${{ needs.meta.outputs.version }}" `
+            --dart-define="APP_VERSION=${{ needs.meta.outputs.version }}" `
+            --dart-define="GITHUB_REPO=${{ github.repository }}"
+      - name: Package Windows Installer (.exe) & Portable ZIP
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = (Get-Command iscc).Source }
+          & $iscc "/DMyAppVersion=${{ needs.meta.outputs.version }}" deploy\windows-installer.iss
+          Compress-Archive -Path "client\build\windows\x64\runner\Release\*" `
+            -DestinationPath "dist\IntelHub-${{ needs.meta.outputs.tag }}-win64-portable.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-windows
+          path: |
+            dist/IntelHub-Setup-*.exe
+            dist/IntelHub-*-win64-portable.zip
+
+  build-android:
+    needs: meta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Build Android arm64 Release APK
+        working-directory: client
+        run: |
+          flutter pub get
+          flutter build apk --release --target-platform android-arm64 \
+            --build-name="${{ needs.meta.outputs.version }}" \
+            --dart-define="APP_VERSION=${{ needs.meta.outputs.version }}" \
+            --dart-define="GITHUB_REPO=${{ github.repository }}"
+          mkdir -p ../artifacts
+          cp build/app/outputs/flutter-apk/app-release.apk \
+            "../artifacts/IntelHub-${{ needs.meta.outputs.tag }}-android-arm64.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-android
+          path: artifacts/*.apk
+
+  publish-release:
+    needs: [meta, build-server-linux, build-windows, build-android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-files
+          merge-multiple: true
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.meta.outputs.tag }}
+          name: IntelHub ${{ needs.meta.outputs.tag }}
+          generate_release_notes: true
+          files: release-files/*

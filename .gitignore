@@ -1,0 +1,37 @@
+# Environment & Secrets (never commit!)
+.env
+*.env
+!*.env.example
+*service-account*.json
+google-services.json
+configs/config.yaml
+
+# SQLite databases & backups
+*.db
+*.db-shm
+*.db-wal
+backups/
+
+# Build artifacts
+build/
+dist/
+server/intel-hub
+server/intel-hub.exe
+client/build/
+client/.dart_tool/
+client/.flutter-plugins-dependencies
+client/windows/flutter/ephemeral/
+client/android/.gradle/
+client/android/local.properties
+client/android/app/debug/
+client/android/app/profile/
+client/android/app/release/
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+**/.idea/
+__pycache__/
+*.pyc

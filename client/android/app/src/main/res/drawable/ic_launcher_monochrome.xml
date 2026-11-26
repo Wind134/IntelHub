@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Centered inside 66dp safe zone (21..87) for ColorOS 17 / Material You themed icons -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,30 A24,24 0 1,0 78,54"
+        android:strokeWidth="5.2"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,39 A15,15 0 1,0 69,54"
+        android:strokeWidth="4.6"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,48 A6,6 0 1,0 54,60 A6,6 0 1,0 54,48 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M71.5,33.5 A4.2,4.2 0 1,0 71.5,41.9 A4.2,4.2 0 1,0 71.5,33.5 Z" />
+</vector>
