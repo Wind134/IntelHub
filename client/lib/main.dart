@@ -235,7 +235,8 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     final prefs = await SharedPreferences.getInstance();
     final savedUrl = prefs.getString('server_url') ?? '';
     final savedToken = prefs.getString('api_token') ?? '';
-    final savedRepo = prefs.getString('github_repo') ?? kDefaultGithubRepo;
+    final savedRepo = prefs.getString('github_repo');
+    final effectiveRepo = (savedRepo != null && savedRepo.trim().isNotEmpty) ? savedRepo : kDefaultGithubRepo;
     final savedGhToken = prefs.getString('github_token') ?? '';
     _minPushScore = prefs.getInt('min_push_score') ?? 8;
     _androidKeepAlive = prefs.getBool('android_keep_alive') ?? true;
@@ -244,7 +245,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     _api.apiToken = savedToken;
     _urlCtrl.text = savedUrl;
     _tokenCtrl.text = savedToken;
-    _repoCtrl.text = savedRepo;
+    _repoCtrl.text = effectiveRepo;
     _ghTokenCtrl.text = savedGhToken;
 
     if (mounted) {
@@ -657,14 +658,8 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
   }
 
   Future<void> _checkForUpdates() async {
-    final repo = _repoCtrl.text.trim();
+    final repo = _repoCtrl.text.trim().isNotEmpty ? _repoCtrl.text.trim() : kDefaultGithubRepo;
     final ghToken = _ghTokenCtrl.text.trim();
-    if (repo.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先填写 GitHub 仓库名（如 username/InformationPlatform）')),
-      );
-      return;
-    }
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('github_repo', repo);
     await prefs.setString('github_token', ghToken);
@@ -1848,8 +1843,19 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
               children: [
                 Row(
                   children: [
-                    Text('当前版本：v$kAppVersion', style: Theme.of(context).textTheme.titleSmall),
-                    const Spacer(),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('当前版本：v$kAppVersion', style: Theme.of(context).textTheme.titleSmall),
+                          const SizedBox(height: 2),
+                          Text(
+                            '更新源：github.com/${_repoCtrl.text.trim().isNotEmpty ? _repoCtrl.text.trim() : kDefaultGithubRepo}',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ),
                     FilledButton.tonalIcon(
                       onPressed: _checkingUpdate ? null : _checkForUpdates,
                       icon: _checkingUpdate
@@ -1859,22 +1865,29 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _repoCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'GitHub 仓库 (owner/repo)',
-                    hintText: 'your-username/InformationPlatform',
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _ghTokenCtrl,
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'GitHub Token（可选，仅私有仓库检查更新时需要）',
-                    hintText: '公开仓库请留空',
-                  ),
+                const SizedBox(height: 6),
+                ExpansionTile(
+                  tilePadding: EdgeInsets.zero,
+                  shape: const Border(),
+                  title: Text('高级：自定义 Fork 仓库（默认无需修改）', style: Theme.of(context).textTheme.bodySmall),
+                  children: [
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: _repoCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'GitHub 仓库 (owner/repo)',
+                        hintText: kDefaultGithubRepo,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _ghTokenCtrl,
+                      obscureText: true,
+                      decoration: const InputDecoration(
+                        labelText: 'GitHub Token（公开仓库留空即可）',
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
