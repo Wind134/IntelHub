@@ -97,6 +97,43 @@ func (f *FeishuNotifier) SendVerificationUpdate(ctx context.Context, ev *model.I
 	return err
 }
 
+// SendDigestCard pushes the generated daily executive briefing card to Feishu.
+func (f *FeishuNotifier) SendDigestCard(ctx context.Context, d model.DailyDigest) error {
+	if !f.Enabled() {
+		return nil
+	}
+	card := map[string]any{
+		"config": map[string]any{"wide_screen_mode": true},
+		"header": map[string]any{
+			"template": "indigo",
+			"title": map[string]any{
+				"tag":     "plain_text",
+				"content": fmt.Sprintf("📘 %s · %s (%d条精选)", d.DigestDate, d.Title, d.EventCount),
+			},
+		},
+		"elements": []any{
+			map[string]any{
+				"tag":     "markdown",
+				"content": truncateRunes(d.ContentMD, 3200),
+			},
+			map[string]any{
+				"tag": "note",
+				"elements": []any{
+					map[string]any{
+						"tag":     "plain_text",
+						"content": "完整排版可在 Windows / Android 客户端「内参」页随时回看",
+					},
+				},
+			},
+		},
+	}
+	if strings.TrimSpace(f.cfg.FeishuWebhook) != "" {
+		return f.sendWebhook(ctx, card)
+	}
+	_, err := f.sendAppMessage(ctx, card)
+	return err
+}
+
 func buildFeishuCard(ev *model.IntelEvent) map[string]any {
 	template := "orange"
 	level := "P1 突发"

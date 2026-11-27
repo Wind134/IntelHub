@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -29,9 +30,16 @@ type Server struct {
 	enricher *pipeline.Enricher
 	feishu   *notifier.FeishuNotifier
 	fcm      *notifier.FCMNotifier
+
+	policyMu sync.RWMutex
+	policy   model.NotificationPolicy
 }
 
 func NewServer(cfg *config.Config, st *store.Store, hub *Hub, sc *scorer.Client, en *pipeline.Enricher, feishu *notifier.FeishuNotifier, fcm *notifier.FCMNotifier) *Server {
+	minScore := cfg.Notify.FeishuMinScore
+	if minScore <= 0 {
+		minScore = 8
+	}
 	return &Server{
 		cfg:      cfg,
 		store:    st,
@@ -40,7 +48,94 @@ func NewServer(cfg *config.Config, st *store.Store, hub *Hub, sc *scorer.Client,
 		enricher: en,
 		feishu:   feishu,
 		fcm:      fcm,
+		policy: model.NotificationPolicy{
+			MinPushScore:           minScore,
+			Categories:             []string{"finance", "ai", "bigtech", "world"},
+			EnableFeishu:           true,
+			EnableVerificationPush: true,
+			EnableDailyDigest:      true,
+		},
 	}
+}
+
+func (s *Server) GetNotificationPolicy() model.NotificationPolicy {
+	s.policyMu.RLock()
+	defer s.policyMu.RUnlock()
+	p := s.policy
+	p.Categories = append([]string(nil), s.policy.Categories...)
+	return p
+}
+
+func (s *Server) SetNotificationPolicy(p model.NotificationPolicy) {
+	if p.MinPushScore < 1 {
+		p.MinPushScore = 8
+	}
+	if p.MinPushScore > 10 {
+		p.MinPushScore = 10
+	}
+	if len(p.Categories) == 0 {
+		p.Categories = []string{"finance", "ai", "bigtech", "world"}
+	}
+	s.policyMu.Lock()
+	s.policy = p
+	s.policyMu.Unlock()
+}
+
+// GenerateTodayDigest compiles today's P1 + pending P2 items into daily_digests and notifies Feishu.
+func (s *Server) GenerateTodayDigest(ctx context.Context) (model.DailyDigest, error) {
+	shanghai := time.FixedZone("Asia/Shanghai", 8*3600)
+	nowBJ := time.Now().In(shanghai)
+	dateStr := nowBJ.Format("2006-01-02")
+	sinceTS := time.Now().Add(-24 * time.Hour).Unix()
+
+	p1Events, _ := s.store.ListEvents(ctx, model.EventFilter{
+		MinScore: 8,
+		FromTS:   sinceTS,
+		Sort:     "score_desc",
+		Limit:    25,
+	})
+	pendingP2, _ := s.store.PendingDigestItems(ctx)
+	var recentP2 []model.DigestItem
+	for _, it := range pendingP2 {
+		if it.PublishedAt >= sinceTS || it.CreatedAt >= sinceTS {
+			recentP2 = append(recentP2, it)
+		}
+	}
+	if len(recentP2) == 0 && len(pendingP2) > 0 {
+		recentP2 = pendingP2
+	}
+	if len(p1Events) == 0 && len(recentP2) == 0 {
+		return model.DailyDigest{}, fmt.Errorf("过去 24 小时暂无可汇总的 5 分以上情报")
+	}
+
+	md, modelUsed, err := s.scorer.GenerateDailyDigest(ctx, dateStr, p1Events, recentP2)
+	if err != nil {
+		return model.DailyDigest{}, err
+	}
+	digest := model.DailyDigest{
+		DigestDate: dateStr,
+		Title:      "今日情报内参",
+		ContentMD:  md,
+		EventCount: len(p1Events) + len(recentP2),
+		CreatedAt:  time.Now().Unix(),
+	}
+	if err := s.store.SaveDailyDigest(ctx, digest); err != nil {
+		return model.DailyDigest{}, err
+	}
+	_, _ = s.store.AckDigestItems(ctx, time.Now().Unix())
+	log.Printf("[digest] generated %s (%d items) via %s", dateStr, digest.EventCount, modelUsed)
+
+	policy := s.GetNotificationPolicy()
+	if policy.EnableFeishu && s.feishu != nil && s.feishu.Enabled() {
+		go func(d model.DailyDigest) {
+			nctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := s.feishu.SendDigestCard(nctx, d); err != nil {
+				log.Printf("[feishu] digest card failed: %v", err)
+			}
+		}(digest)
+	}
+	return digest, nil
 }
 
 // OnEventCreated implements pipeline.EventSink for real-time delivery to WS clients, Android FCM, and Feishu.
@@ -55,8 +150,10 @@ func (s *Server) OnEventCreated(ctx context.Context, ev *model.IntelEvent) {
 		return
 	}
 
-	// Feishu notification (capture returned message_id so 9+ verification replies inside its thread or patches in-place)
-	if ev.Score >= s.cfg.Notify.FeishuMinScore && s.feishu != nil && s.feishu.Enabled() {
+	policy := s.GetNotificationPolicy()
+
+	// Feishu notification governed by live NotificationPolicy
+	if policy.EnableFeishu && ev.Score >= policy.MinPushScore && categoryAllowed(policy.Categories, ev.Category) && s.feishu != nil && s.feishu.Enabled() {
 		go func(e model.IntelEvent) {
 			nctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
@@ -72,7 +169,7 @@ func (s *Server) OnEventCreated(ctx context.Context, ev *model.IntelEvent) {
 	}
 
 	// Android FCM wake-up push
-	if ev.Score >= 8 && s.fcm != nil && s.fcm.Enabled() {
+	if ev.Score >= policy.MinPushScore && s.fcm != nil && s.fcm.Enabled() {
 		go func(e model.IntelEvent) {
 			nctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
@@ -102,7 +199,8 @@ func (s *Server) OnEventVerified(ctx context.Context, ev *model.IntelEvent) {
 		SeqID: ev.ID,
 		Event: ev,
 	})
-	if s.feishu != nil && s.feishu.Enabled() && ev.Score >= 9 {
+	policy := s.GetNotificationPolicy()
+	if policy.EnableFeishu && policy.EnableVerificationPush && s.feishu != nil && s.feishu.Enabled() && ev.Score >= policy.MinPushScore {
 		go func(e model.IntelEvent) {
 			nctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
@@ -122,10 +220,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/history/ask", s.auth(s.handleAskHistory))
 	mux.HandleFunc("GET /api/v1/entities/{name}/timeline", s.auth(s.handleEntityTimeline))
 	mux.HandleFunc("GET /api/v1/digests", s.auth(s.handleListDigests))
+	mux.HandleFunc("POST /api/v1/digests/generate", s.auth(s.handleGenerateDigest))
 	mux.HandleFunc("POST /api/v1/devices/sync", s.auth(s.handleSyncDevice))
 	mux.HandleFunc("GET /api/v1/system/overview", s.auth(s.handleSystemOverview))
 	mux.HandleFunc("GET /api/v1/settings/models", s.auth(s.handleGetModels))
 	mux.HandleFunc("PATCH /api/v1/settings/models", s.auth(s.handleUpdateModels))
+	mux.HandleFunc("GET /api/v1/settings/notifications", s.auth(s.handleGetNotificationPolicy))
+	mux.HandleFunc("PATCH /api/v1/settings/notifications", s.auth(s.handleUpdateNotificationPolicy))
 	mux.HandleFunc("GET /api/v1/stream", s.auth(s.handleStream))
 
 	return withCORS(mux)
@@ -272,6 +373,37 @@ func (s *Server) handleListDigests(w http.ResponseWriter, r *http.Request) {
 		items = []model.DailyDigest{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+}
+
+func (s *Server) handleGenerateDigest(w http.ResponseWriter, r *http.Request) {
+	digest, err := s.GenerateTodayDigest(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, digest)
+}
+
+func (s *Server) handleGetNotificationPolicy(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.GetNotificationPolicy())
+}
+
+func (s *Server) handleUpdateNotificationPolicy(w http.ResponseWriter, r *http.Request) {
+	var p model.NotificationPolicy
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	s.SetNotificationPolicy(p)
+	active := s.GetNotificationPolicy()
+	raw, _ := json.Marshal(active)
+	if err := s.store.SetSetting(r.Context(), "notification_policy", string(raw)); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	log.Printf("[settings] updated notification policy: min_score=%d categories=%v feishu=%v verify=%v daily_digest=%v",
+		active.MinPushScore, active.Categories, active.EnableFeishu, active.EnableVerificationPush, active.EnableDailyDigest)
+	writeJSON(w, http.StatusOK, active)
 }
 
 func (s *Server) handleSyncDevice(w http.ResponseWriter, r *http.Request) {

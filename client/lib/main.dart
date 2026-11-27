@@ -113,13 +113,25 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
   WebSocketChannel? _ws;
   StreamSubscription? _wsSub;
   Timer? _reconnectTimer;
+  Timer? _fallbackPollTimer;
 
   bool _isMaximized = false;
   int _navIndex = 0; // 0: 实时流, 1: 历史检索库, 2: 每日内参, 3: 仪表盘与设置
   bool _wsConnected = false;
   int _minPushScore = 8;
+  Set<String> _localNotifyCategories = {'finance', 'ai', 'bigtech', 'world'};
   bool _androidKeepAlive = true;
   int _lastEventId = 0;
+  final Set<int> _notifiedIds = <int>{};
+
+  // Server-wide Notification Policy (hot-synced to backend Feishu / FCM / Auto-Digest)
+  int _serverMinScore = 8;
+  Set<String> _serverNotifyCategories = {'finance', 'ai', 'bigtech', 'world'};
+  bool _serverEnableFeishu = true;
+  bool _serverEnableVerify = true;
+  bool _serverEnableDailyDigest = true;
+  bool _savingNotifyPolicy = false;
+  bool _generatingDigest = false;
 
   // Live Feed & Historical Search state
   List<IntelEvent> _events = [];
@@ -201,6 +213,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     _wsSub?.cancel();
     _ws?.sink.close();
     _reconnectTimer?.cancel();
+    _fallbackPollTimer?.cancel();
     _searchCtrl.dispose();
     _askCtrl.dispose();
     _detailScrollCtrl.dispose();
@@ -239,6 +252,10 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     final effectiveRepo = (savedRepo != null && savedRepo.trim().isNotEmpty) ? savedRepo : kDefaultGithubRepo;
     final savedGhToken = prefs.getString('github_token') ?? '';
     _minPushScore = prefs.getInt('min_push_score') ?? 8;
+    final savedLocalCats = prefs.getStringList('local_notify_categories');
+    if (savedLocalCats != null && savedLocalCats.isNotEmpty) {
+      _localNotifyCategories = savedLocalCats.toSet();
+    }
     _androidKeepAlive = prefs.getBool('android_keep_alive') ?? true;
 
     _api.baseUrl = savedUrl;
@@ -266,11 +283,36 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     if (savedUrl.isNotEmpty) {
       await _refreshEvents();
       _connectWebSocket();
+      _startFallbackPoller();
       _loadModelSettings();
+      _loadNotificationPolicy();
       if (Platform.isAndroid && _androidKeepAlive) {
         await NativeNotifier.instance.startAndroidKeepAlive('实时在线 · 突发秒级监测中');
       }
     }
+  }
+
+  /// Periodic 2-minute HTTP delta poll backup so ColorOS Doze TCP suspension never misses P1 alerts.
+  void _startFallbackPoller() {
+    _fallbackPollTimer?.cancel();
+    _fallbackPollTimer = Timer.periodic(const Duration(minutes: 2), (_) async {
+      if (_api.baseUrl.trim().isEmpty || _lastEventId <= 0) return;
+      try {
+        final missed = await _api.fetchEvents(
+          minScore: _minPushScore,
+          sort: 'time_desc',
+          limit: 15,
+        );
+        for (final ev in missed.reversed) {
+          if (ev.id > _lastEventId) {
+            _handleStreamEvent('event.created', ev);
+          }
+        }
+        if (!_wsConnected) {
+          _connectWebSocket();
+        }
+      } catch (_) {}
+    });
   }
 
   void _connectWebSocket() {
@@ -322,7 +364,13 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
         _bumpDetail();
       }
     });
-    if (type == 'event.created' && ev.score >= _minPushScore && ev.pushStatus != 'cooled_down') {
+    if (type == 'event.created' &&
+        ev.score >= _minPushScore &&
+        _localNotifyCategories.contains(ev.category) &&
+        ev.pushStatus != 'cooled_down' &&
+        !_notifiedIds.contains(ev.id)) {
+      _notifiedIds.add(ev.id);
+      if (_notifiedIds.length > 300) _notifiedIds.clear();
       NativeNotifier.instance.showBreakingAlert(ev);
     }
   }
@@ -579,6 +627,73 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     } catch (_) {}
   }
 
+  Future<void> _generateTodayDigest() async {
+    if (_generatingDigest) return;
+    setState(() => _generatingDigest = true);
+    try {
+      final d = await _api.generateTodayDigest();
+      await _loadDigests();
+      if (!mounted) return;
+      setState(() => _selectedDigest = d);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已生成 ${d.digestDate}《${d.title}》（共提炼 ${d.eventCount} 条情报）')),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('生成今日内参失败：$e')));
+      }
+    } finally {
+      if (mounted) setState(() => _generatingDigest = false);
+    }
+  }
+
+  Future<void> _loadNotificationPolicy() async {
+    try {
+      final p = await _api.fetchNotificationPolicy();
+      if (!mounted) return;
+      setState(() {
+        _serverMinScore = p.minPushScore;
+        _serverNotifyCategories = p.categories.toSet();
+        _serverEnableFeishu = p.enableFeishu;
+        _serverEnableVerify = p.enableVerificationPush;
+        _serverEnableDailyDigest = p.enableDailyDigest;
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _saveNotificationPolicy() async {
+    setState(() => _savingNotifyPolicy = true);
+    try {
+      final cats = _serverNotifyCategories.isEmpty
+          ? ['finance', 'ai', 'bigtech', 'world']
+          : _serverNotifyCategories.toList();
+      final updated = await _api.updateNotificationPolicy(NotificationPolicy(
+        minPushScore: _serverMinScore,
+        categories: cats,
+        enableFeishu: _serverEnableFeishu,
+        enableVerificationPush: _serverEnableVerify,
+        enableDailyDigest: _serverEnableDailyDigest,
+      ));
+      if (!mounted) return;
+      setState(() {
+        _serverMinScore = updated.minPushScore;
+        _serverNotifyCategories = updated.categories.toSet();
+        _serverEnableFeishu = updated.enableFeishu;
+        _serverEnableVerify = updated.enableVerificationPush;
+        _serverEnableDailyDigest = updated.enableDailyDigest;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('全局通知策略已热同步至服务端（≥${updated.minPushScore}分推送）')),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('保存全局通知策略失败：$e')));
+      }
+    } finally {
+      if (mounted) setState(() => _savingNotifyPolicy = false);
+    }
+  }
+
   Future<void> _loadOverview() async {
     try {
       final ov = await _api.fetchOverview();
@@ -636,12 +751,14 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     await prefs.setString('server_url', _urlCtrl.text.trim());
     await prefs.setString('api_token', _tokenCtrl.text.trim());
     await prefs.setInt('min_push_score', _minPushScore);
+    await prefs.setStringList('local_notify_categories', _localNotifyCategories.toList());
     await prefs.setBool('android_keep_alive', _androidKeepAlive);
     await prefs.setString('github_repo', _repoCtrl.text.trim());
     await prefs.setString('github_token', _ghTokenCtrl.text.trim());
     _api.baseUrl = _urlCtrl.text.trim();
     _api.apiToken = _tokenCtrl.text.trim();
     _connectWebSocket();
+    _startFallbackPoller();
     if (Platform.isAndroid) {
       if (_androidKeepAlive && _api.baseUrl.isNotEmpty) {
         await NativeNotifier.instance.startAndroidKeepAlive('实时在线 · 突发秒级监测中');
@@ -649,7 +766,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
         await NativeNotifier.instance.stopAndroidKeepAlive();
       }
     }
-    await Future.wait([_refreshEvents(), _loadOverview(), _loadModelSettings()]);
+    await Future.wait([_refreshEvents(), _loadOverview(), _loadModelSettings(), _loadNotificationPolicy()]);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('配置已永久保存并重新建立实时流')),
@@ -830,6 +947,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     if (idx == 3) {
       _loadOverview();
       _loadModelSettings();
+      _loadNotificationPolicy();
     }
   }
 
@@ -1525,6 +1643,14 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
             children: [
               Text('每日内参归档', style: Theme.of(context).textTheme.titleMedium),
               const Spacer(),
+              FilledButton.tonalIcon(
+                onPressed: _generatingDigest ? null : _generateTodayDigest,
+                icon: _generatingDigest
+                    ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.auto_awesome_rounded, size: 16),
+                label: Text(_generatingDigest ? '生成中…' : '生成今日内参'),
+              ),
+              const SizedBox(width: 4),
               IconButton(onPressed: _loadDigests, icon: const Icon(Icons.refresh_rounded, size: 18)),
             ],
           ),
@@ -1727,8 +1853,111 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
         ),
         const SizedBox(height: 22),
 
-        // 3. Connection & Notification Card
-        Text('服务端连接与原生通知', style: Theme.of(context).textTheme.titleLarge),
+        // 2.5 Global Server Notification Level & Category Policy
+        Row(
+          children: [
+            Text('全局消息通知级别与领域（同步服务端）', style: Theme.of(context).textTheme.titleLarge),
+            const Spacer(),
+            IconButton(
+              tooltip: '刷新服务端通知策略',
+              onPressed: _loadNotificationPolicy,
+              icon: const Icon(Icons.refresh_rounded, size: 18),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          '控制服务端飞书卡片 / FCM 推送以及每日 21:00 自动内参的触发级别与关注领域，保存后全通道即时生效。',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+        const SizedBox(height: 10),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('服务端全局推送最低级别（当前：≥ $_serverMinScore 分）', style: Theme.of(context).textTheme.titleSmall),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final preset in const [
+                      (9, '🔴 仅特急 (9-10分)'),
+                      (8, '🟠 重要突发 (≥8分)'),
+                      (7, '🔵 精选重点 (≥7分)'),
+                      (6, '⚪ 次级动态 (≥6分)'),
+                    ])
+                      _CompactPill(
+                        label: preset.$2,
+                        selected: _serverMinScore == preset.$1,
+                        onTap: () => setState(() => _serverMinScore = preset.$1),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Text('服务端推送关注领域', style: Theme.of(context).textTheme.titleSmall),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final cat in const [
+                      ('finance', '金融/美股'),
+                      ('ai', 'AI 行业'),
+                      ('bigtech', '大厂动态'),
+                      ('world', '全球突发'),
+                    ])
+                      _CompactPill(
+                        label: cat.$2,
+                        selected: _serverNotifyCategories.contains(cat.$1),
+                        onTap: () => setState(() {
+                          if (_serverNotifyCategories.contains(cat.$1)) {
+                            if (_serverNotifyCategories.length > 1) _serverNotifyCategories.remove(cat.$1);
+                          } else {
+                            _serverNotifyCategories.add(cat.$1);
+                          }
+                        }),
+                      ),
+                  ],
+                ),
+                const Divider(height: 24),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('飞书卡片实时推送'),
+                  subtitle: const Text('达到上述级别与领域时，推送飞书交互卡片（走 OPPO Push 极速触达）'),
+                  value: _serverEnableFeishu,
+                  onChanged: (v) => setState(() => _serverEnableFeishu = v),
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('9+ 分权威多源交叉核验补充'),
+                  subtitle: const Text('自动在原新闻话题内追加或原地更新核验结论'),
+                  value: _serverEnableVerify,
+                  onChanged: (v) => setState(() => _serverEnableVerify = v),
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('每日 21:00 自动生成《今日情报内参》'),
+                  subtitle: const Text('自动汇总 5-7 分次级情报与当日 P1 精选并写入内参归档'),
+                  value: _serverEnableDailyDigest,
+                  onChanged: (v) => setState(() => _serverEnableDailyDigest = v),
+                ),
+                const SizedBox(height: 10),
+                FilledButton.icon(
+                  onPressed: _savingNotifyPolicy ? null : _saveNotificationPolicy,
+                  icon: const Icon(Icons.cloud_done_rounded, size: 18),
+                  label: Text(_savingNotifyPolicy ? '正在同步到服务端…' : '保存全局通知策略'),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 22),
+
+        // 3. Connection & Local Device Notification Card
+        Text('服务端连接与本机通知偏好', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 10),
         Card(
           child: Padding(
@@ -1763,12 +1992,39 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                     ),
                   ],
                 ),
+                const SizedBox(height: 6),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final cat in const [
+                        ('finance', '本机提醒:金融'),
+                        ('ai', '本机提醒:AI'),
+                        ('bigtech', '本机提醒:大厂'),
+                        ('world', '本机提醒:全球'),
+                      ])
+                        _CompactPill(
+                          label: cat.$2,
+                          selected: _localNotifyCategories.contains(cat.$1),
+                          onTap: () => setState(() {
+                            if (_localNotifyCategories.contains(cat.$1)) {
+                              if (_localNotifyCategories.length > 1) _localNotifyCategories.remove(cat.$1);
+                            } else {
+                              _localNotifyCategories.add(cat.$1);
+                            }
+                          }),
+                        ),
+                    ],
+                  ),
+                ),
                 if (Platform.isAndroid) ...[
                   const Divider(height: 20),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('ColorOS 后台常驻守护通知'),
-                    subtitle: const Text('在通知栏常驻静默守护卡片，防止切后台后断开实时突发监测'),
+                    subtitle: const Text('在通知栏常驻静默守护卡片 + 每2分钟兜底同步，防息屏漏报'),
                     value: _androidKeepAlive,
                     onChanged: (v) async {
                       setState(() => _androidKeepAlive = v);
@@ -1818,12 +2074,18 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                       icon: const Icon(Icons.notifications_active_rounded, size: 18),
                       label: const Text('测试原生系统通知'),
                     ),
-                    if (Platform.isAndroid)
+                    if (Platform.isAndroid) ...[
                       OutlinedButton.icon(
                         onPressed: () => NativeNotifier.instance.openAndroidNotificationSettings(),
                         icon: const Icon(Icons.settings_applications_rounded, size: 18),
                         label: const Text('ColorOS 通知权限'),
                       ),
+                      OutlinedButton.icon(
+                        onPressed: () => NativeNotifier.instance.openAndroidBatterySettings(),
+                        icon: const Icon(Icons.battery_charging_full_rounded, size: 18),
+                        label: const Text('允许后台高灵敏运行'),
+                      ),
+                    ],
                   ],
                 ),
               ],

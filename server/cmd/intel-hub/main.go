@@ -124,6 +124,14 @@ func runServe(args []string) {
 	}
 
 	srv := api.NewServer(cfg, st, hub, llm, enricher, feishu, fcm)
+	if savedPolicy, err := st.GetSetting(context.Background(), "notification_policy"); err == nil && savedPolicy != "" {
+		var p model.NotificationPolicy
+		if err := json.Unmarshal([]byte(savedPolicy), &p); err == nil {
+			srv.SetNotificationPolicy(p)
+			log.Printf("[intel-hub] restored notification policy from SQLite: min_score=%d categories=%v feishu=%v daily_digest=%v",
+				p.MinPushScore, p.Categories, p.EnableFeishu, p.EnableDailyDigest)
+		}
+	}
 	engine := pipeline.NewEngine(cfg, st, llm, enricher, srv)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -139,8 +147,8 @@ func runServe(args []string) {
 	fhCollector := collector.NewFinnhubCollector(cfg.Finnhub, st, engine.ProcessBatch)
 	fhCollector.Start(ctx)
 
-	// Daily maintenance loop: prune old dedup fingerprints (7d) & hot VACUUM backup at 03:30 UTC+8.
-	go runMaintenanceLoop(ctx, cfg, st)
+	// Daily maintenance loop: 21:00 UTC+8 executive digest + 03:30 UTC+8 backup & fingerprint prune.
+	go runMaintenanceLoop(ctx, cfg, st, srv)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Server.ListenAddr,
@@ -163,11 +171,12 @@ func runServe(args []string) {
 	_ = httpSrv.Shutdown(shutCtx)
 }
 
-func runMaintenanceLoop(ctx context.Context, cfg *config.Config, st *store.Store) {
+func runMaintenanceLoop(ctx context.Context, cfg *config.Config, st *store.Store, srv *api.Server) {
 	shanghai := time.FixedZone("Asia/Shanghai", 8*3600)
-	ticker := time.NewTicker(30 * time.Minute)
+	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 	lastBackupDay := ""
+	lastDigestDay := ""
 
 	for {
 		select {
@@ -176,6 +185,20 @@ func runMaintenanceLoop(ctx context.Context, cfg *config.Config, st *store.Store
 		case <-ticker.C:
 			now := time.Now().In(shanghai)
 			today := now.Format("2006-01-02")
+
+			// Daily 21:00 UTC+8 automated executive digest
+			if now.Hour() == 21 && lastDigestDay != today {
+				policy := srv.GetNotificationPolicy()
+				if policy.EnableDailyDigest {
+					lastDigestDay = today
+					dctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+					if _, err := srv.GenerateTodayDigest(dctx); err != nil {
+						log.Printf("[maint] daily digest skipped/error: %v", err)
+					}
+					cancel()
+				}
+			}
+
 			if now.Hour() == 3 && now.Minute() >= 30 && lastBackupDay != today {
 				lastBackupDay = today
 				if deleted, err := st.PruneOldFingerprints(ctx, 7); err == nil {

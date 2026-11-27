@@ -622,7 +622,7 @@ func (s *Store) ListEvents(ctx context.Context, f model.EventFilter) ([]model.In
 		if f.AfterID > 0 {
 			sb.WriteString(` ORDER BY e.id ASC`)
 		} else {
-			sb.WriteString(` ORDER BY e.id DESC`)
+			sb.WriteString(` ORDER BY e.published_at DESC, e.id DESC`)
 		}
 	}
 

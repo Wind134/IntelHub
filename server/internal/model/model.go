@@ -193,6 +193,16 @@ type ModelSettingsResponse struct {
 	Providers []ModelProviderCatalog `json:"providers"`
 }
 
+// NotificationPolicy controls server-side alert routing (Feishu / FCM / verification / daily digest)
+// configurable live from Windows/Android clients and persisted in SQLite app_settings.
+type NotificationPolicy struct {
+	MinPushScore           int      `json:"min_push_score"`            // 5..10 (default 8)
+	Categories             []string `json:"categories"`                // finance | ai | bigtech | world
+	EnableFeishu           bool     `json:"enable_feishu"`             // push cards to Feishu
+	EnableVerificationPush bool     `json:"enable_verification_push"`  // attach 9+ fact-check updates
+	EnableDailyDigest      bool     `json:"enable_daily_digest"`       // auto-generate 21:00 UTC+8 digest
+}
+
 // TierFromScore maps 1-10 score to severity tier.
 func TierFromScore(score int) string {
 	switch {

@@ -340,6 +340,92 @@ func (c *Client) StreamAsk(ctx context.Context, systemPrompt, userPrompt string,
 	return full.String(), modelUsed, sc.Err()
 }
 
+// GenerateDailyDigest synthesizes a structured Chinese Markdown executive briefing from pending P2 + P1 items.
+func (c *Client) GenerateDailyDigest(ctx context.Context, dateStr string, p1Events []model.IntelEvent, p2Items []model.DigestItem) (string, string, error) {
+	c.mu.RLock()
+	apiKey := c.cfg.APIKey
+	baseURL := c.cfg.BaseURL
+	mdl := c.cfg.StrongModel
+	if mdl == "" {
+		mdl = c.cfg.FastModel
+	}
+	c.mu.RUnlock()
+
+	if len(p1Events) == 0 && len(p2Items) == 0 {
+		return "", mdl, fmt.Errorf("no events available for digest")
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("日期：%s (UTC+8)\n\n", dateStr))
+	if len(p1Events) > 0 {
+		sb.WriteString("【今日 P1 高优突发（8-10分）】\n")
+		maxP1 := 20
+		if len(p1Events) < maxP1 {
+			maxP1 = len(p1Events)
+		}
+		for _, ev := range p1Events[:maxP1] {
+			sb.WriteString(fmt.Sprintf("- [%s | %d分 | %s] %s — %s (%s)\n",
+				ev.EventCode, ev.Score, ev.Category, ev.ZhTitle, ev.ImpactAnalysis, ev.CanonicalURL))
+		}
+		sb.WriteString("\n")
+	}
+	if len(p2Items) > 0 {
+		sb.WriteString("【今日 P2 次级重点动态（5-7分）】\n")
+		maxP2 := 45
+		if len(p2Items) < maxP2 {
+			maxP2 = len(p2Items)
+		}
+		for _, it := range p2Items[:maxP2] {
+			sb.WriteString(fmt.Sprintf("- [%s | %d分 | %s] %s (%s)\n",
+				it.EventCode, it.Score, it.Category, it.BulletPoint, it.URL))
+		}
+	}
+
+	if strings.TrimSpace(apiKey) == "" {
+		return sb.String(), "raw", nil
+	}
+
+	sysPrompt := `你是全天候金融与科技资深情报主编。请将今日收集的 P1 突发与 P2 次级动态，去重合并、提炼跨事件因果脉络，编排为一份高信息密度、结构清晰的《今日情报内参》（Markdown 格式）。
+要求：
+1. 按「## 一、核心突发复盘」「## 二、金融与美股主线」「## 三、AI 与大模型演进」「## 四、大厂商业与供应链」「## 五、全球宏观与风险预警」「## 六、明日关注重点」组织（无内容的板块可省略）；
+2. 禁止流水账罗列，合并同主题多篇报道，每条提炼关键事实+核心影响，并保留关键事件编号（如 [#EVT-...]）；
+3. 语言简练专业，适合 3 分钟快速通读。`
+
+	body, _ := json.Marshal(chatReq{
+		Model:       mdl,
+		Messages:    []chatMsg{{Role: "system", Content: sysPrompt}, {Role: "user", Content: sb.String()}},
+		Temperature: 0.25,
+	})
+	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", mdl, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	if strings.Contains(strings.ToLower(baseURL), "opencode.ai") {
+		req.Header.Set("x-opencode-session", "intel-hub-digest-"+dateStr)
+	}
+	longClient := &http.Client{Timeout: 110 * time.Second}
+	resp, err := longClient.Do(req)
+	if err != nil {
+		return "", mdl, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	if resp.StatusCode >= 300 {
+		return "", mdl, fmt.Errorf("digest status %d: %s", resp.StatusCode, string(raw))
+	}
+	var parsed chatResp
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return "", mdl, err
+	}
+	if len(parsed.Choices) == 0 {
+		return "", mdl, fmt.Errorf("empty choices for digest")
+	}
+	return strings.TrimSpace(parsed.Choices[0].Message.Content), mdl, nil
+}
+
 func (c *Client) completeOnce(ctx context.Context, baseURL, apiKey, modelName, sessionID string, msgs []chatMsg, temp float64) (string, int64, error) {
 	body, _ := json.Marshal(chatReq{
 		Model:       modelName,

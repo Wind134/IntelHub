@@ -121,6 +121,34 @@ class IntelApiClient {
         .toList();
   }
 
+  Future<DailyDigest> generateTodayDigest() async {
+    final resp = await _http
+        .post(Uri.parse('$_cleanBase/api/v1/digests/generate'), headers: _headers)
+        .timeout(const Duration(seconds: 120));
+    if (resp.statusCode != 200) throw HttpException('HTTP ${resp.statusCode}: ${resp.body}');
+    return DailyDigest.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
+  }
+
+  Future<NotificationPolicy> fetchNotificationPolicy() async {
+    final resp = await _http
+        .get(Uri.parse('$_cleanBase/api/v1/settings/notifications'), headers: _headers)
+        .timeout(const Duration(seconds: 10));
+    if (resp.statusCode != 200) throw HttpException('HTTP ${resp.statusCode}');
+    return NotificationPolicy.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
+  }
+
+  Future<NotificationPolicy> updateNotificationPolicy(NotificationPolicy policy) async {
+    final resp = await _http
+        .patch(
+          Uri.parse('$_cleanBase/api/v1/settings/notifications'),
+          headers: _headers,
+          body: jsonEncode(policy.toJson()),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (resp.statusCode != 200) throw HttpException('HTTP ${resp.statusCode}: ${resp.body}');
+    return NotificationPolicy.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
+  }
+
   Future<SystemOverview> fetchOverview() async {
     final resp = await _http
         .get(Uri.parse('$_cleanBase/api/v1/system/overview'), headers: _headers)

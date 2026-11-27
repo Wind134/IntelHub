@@ -104,6 +104,15 @@ class NativeNotifier {
     }
   }
 
+  Future<void> openAndroidBatterySettings() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _nativeChannel.invokeMethod('openBatterySettings');
+    } catch (e) {
+      debugPrint('[NativeNotifier] openBatterySettings error: $e');
+    }
+  }
+
   Future<void> showBreakingAlert(IntelEvent ev) async {
     if (!_initialized) {
       await init(onTap: onNotificationTap);

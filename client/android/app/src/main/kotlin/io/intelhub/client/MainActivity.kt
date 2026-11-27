@@ -49,6 +49,21 @@ class MainActivity : FlutterActivity() {
                         startActivity(intent)
                         result.success(true)
                     }
+                    "openBatterySettings" -> {
+                        try {
+                            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                data = Uri.parse("package:$packageName")
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            startActivity(intent)
+                        } catch (_: Exception) {
+                            val fallback = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            startActivity(fallback)
+                        }
+                        result.success(true)
+                    }
                     else -> result.notImplemented()
                 }
             }

@@ -322,3 +322,37 @@ class ModelSettingsResponse {
             .toList(),
       );
 }
+
+class NotificationPolicy {
+  final int minPushScore;
+  final List<String> categories;
+  final bool enableFeishu;
+  final bool enableVerificationPush;
+  final bool enableDailyDigest;
+
+  const NotificationPolicy({
+    required this.minPushScore,
+    required this.categories,
+    required this.enableFeishu,
+    required this.enableVerificationPush,
+    required this.enableDailyDigest,
+  });
+
+  factory NotificationPolicy.fromJson(Map<String, dynamic> j) => NotificationPolicy(
+        minPushScore: (j['min_push_score'] as num?)?.toInt() ?? 8,
+        categories: ((j['categories'] as List?) ?? const ['finance', 'ai', 'bigtech', 'world'])
+            .map((e) => e.toString())
+            .toList(),
+        enableFeishu: (j['enable_feishu'] as bool?) ?? true,
+        enableVerificationPush: (j['enable_verification_push'] as bool?) ?? true,
+        enableDailyDigest: (j['enable_daily_digest'] as bool?) ?? true,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'min_push_score': minPushScore,
+        'categories': categories,
+        'enable_feishu': enableFeishu,
+        'enable_verification_push': enableVerificationPush,
+        'enable_daily_digest': enableDailyDigest,
+      };
+}
