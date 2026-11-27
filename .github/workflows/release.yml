@@ -102,6 +102,16 @@ jobs:
         with:
           channel: stable
           cache: true
+      - name: Decode Firebase google-services.json (if configured)
+        env:
+          GOOGLE_SERVICES_B64: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON_B64 }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_B64" ]; then
+            echo "$GOOGLE_SERVICES_B64" | tr -d '\r\n ' | base64 --decode > client/android/app/google-services.json
+            echo "Firebase google-services.json decoded successfully."
+          else
+            echo "ANDROID_GOOGLE_SERVICES_JSON_B64 not set; building Android APK without FCM."
+          fi
       - name: Build Android arm64 Release APK
         working-directory: client
         run: |

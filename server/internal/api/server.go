@@ -222,6 +222,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/digests", s.auth(s.handleListDigests))
 	mux.HandleFunc("POST /api/v1/digests/generate", s.auth(s.handleGenerateDigest))
 	mux.HandleFunc("POST /api/v1/devices/sync", s.auth(s.handleSyncDevice))
+	mux.HandleFunc("POST /api/v1/devices/test-fcm", s.auth(s.handleTestFCM))
 	mux.HandleFunc("GET /api/v1/system/overview", s.auth(s.handleSystemOverview))
 	mux.HandleFunc("GET /api/v1/settings/models", s.auth(s.handleGetModels))
 	mux.HandleFunc("PATCH /api/v1/settings/models", s.auth(s.handleUpdateModels))
@@ -416,7 +417,82 @@ func (s *Server) handleSyncDevice(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "device_id": dev.DeviceID})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"device_id":   dev.DeviceID,
+		"fcm_enabled": s.fcm != nil && s.fcm.Enabled(),
+	})
+}
+
+func (s *Server) handleTestFCM(w http.ResponseWriter, r *http.Request) {
+	if s.fcm == nil || !s.fcm.Enabled() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "FCM 服务端未启用（未检测到 FCM_SERVICE_ACCOUNT_PATH）"})
+		return
+	}
+	var req struct {
+		DeviceID string `json:"device_id"`
+		DelaySec int    `json:"delay_sec"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.DelaySec < 0 {
+		req.DelaySec = 0
+	}
+	if req.DelaySec > 15 {
+		req.DelaySec = 15
+	}
+	devices, err := s.store.ListFCMDevices(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	var targets []model.ClientDevice
+	for _, d := range devices {
+		if req.DeviceID == "" || d.DeviceID == req.DeviceID {
+			targets = append(targets, d)
+		}
+	}
+	if len(targets) == 0 {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "尚未注册可用的 Android FCM 设备 Token，请先在手机端保存连接"})
+		return
+	}
+	testEv := &model.IntelEvent{
+		ID:             0,
+		EventCode:      "EVT-FCM-TEST",
+		Category:       "ai",
+		ZhTitle:        "FCM 息屏零耗电推送链路验证成功",
+		ImpactAnalysis: "服务端已通过 Google FCM HTTP v1 通道高优直达您的手机通知栏，即使划掉后台或锁屏也能秒级唤醒。",
+		Score:          9,
+		Tier:           "P1_CRITICAL",
+	}
+	if req.DelaySec > 0 {
+		go func(list []model.ClientDevice, delay int) {
+			time.Sleep(time.Duration(delay) * time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			for _, d := range list {
+				if err := s.fcm.SendToDevice(ctx, d, testEv); err != nil {
+					log.Printf("[fcm:test] device=%s err=%v", d.DeviceID, err)
+				}
+			}
+		}(targets, req.DelaySec)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "scheduled_delay_sec": req.DelaySec, "devices": len(targets)})
+		return
+	}
+	sent := 0
+	var lastErr string
+	for _, d := range targets {
+		if err := s.fcm.SendToDevice(r.Context(), d, testEv); err != nil {
+			lastErr = err.Error()
+			log.Printf("[fcm:test] device=%s err=%v", d.DeviceID, err)
+		} else {
+			sent++
+		}
+	}
+	if sent == 0 {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "FCM 发送失败: " + lastErr})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sent": sent})
 }
 
 func (s *Server) handleSystemOverview(w http.ResponseWriter, r *http.Request) {

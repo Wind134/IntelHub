@@ -126,6 +126,12 @@ func (e *Engine) ProcessOne(ctx context.Context, raw model.RawItem) *model.Intel
 		verificationStatus = "pending"
 	}
 
+	// Defensive guard: never allow future-dated published_at (> now + 5m) to hijack the live feed.
+	nowTS := time.Now().Unix()
+	if raw.PublishedAt <= 0 || raw.PublishedAt > nowTS+300 {
+		raw.PublishedAt = nowTS
+	}
+
 	ev, err := e.store.InsertEvent(ctx, &model.IntelEvent{
 		SourceName:         raw.SourceName,
 		Category:           scored.Category,

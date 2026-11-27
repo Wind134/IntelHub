@@ -77,6 +77,17 @@ class NativeNotifier {
     }
   }
 
+  Future<double> setAndroidHighRefreshRate(bool enabled) async {
+    if (!Platform.isAndroid) return 60.0;
+    try {
+      final res = await _nativeChannel.invokeMethod<num>('setHighRefreshRate', {'enabled': enabled});
+      return res?.toDouble() ?? 60.0;
+    } catch (e) {
+      debugPrint('[NativeNotifier] setHighRefreshRate error: $e');
+      return 60.0;
+    }
+  }
+
   Future<void> startAndroidKeepAlive(String statusText) async {
     if (!Platform.isAndroid) return;
     try {

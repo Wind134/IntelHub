@@ -51,3 +51,9 @@ dependencies {
 flutter {
     source = "../.."
 }
+
+// Conditionally apply Google Services plugin only when google-services.json is present
+// so public open-source clones build cleanly without private Firebase credentials.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}

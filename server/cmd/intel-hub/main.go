@@ -121,6 +121,8 @@ func runServe(args []string) {
 	fcm, err := notifier.NewFCMNotifier(cfg.Notify.FCMServiceAccountPath, cfg.Notify.FCMProjectID)
 	if err != nil {
 		log.Printf("[fcm] disabled due to init error: %v", err)
+	} else if fcm.Enabled() {
+		log.Printf("[fcm] HTTP v1 high-priority push enabled (project=%s)", fcm.ProjectID())
 	}
 
 	srv := api.NewServer(cfg, st, hub, llm, enricher, feishu, fcm)

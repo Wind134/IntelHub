@@ -154,8 +154,16 @@ func (p *FeedPoller) fetchRSS(ctx context.Context, feed config.FeedConfig, prevE
 		return nil, "", "", err
 	}
 
+	nowTS := time.Now().Unix()
 	out := make([]model.RawItem, 0, len(parsed.Items))
 	for _, it := range parsed.Items {
+		summary := it.Description
+		if summary == "" {
+			summary = it.Content
+		}
+		if feed.Type == "status_atom" && isRoutineStatusMaintenance(it.Title, summary) {
+			continue
+		}
 		link := strings.TrimSpace(it.Link)
 		if link == "" {
 			link = strings.TrimSpace(it.GUID)
@@ -168,15 +176,11 @@ func (p *FeedPoller) fetchRSS(ctx context.Context, feed config.FeedConfig, prevE
 		if extID == "" {
 			extID = link
 		}
-		pubTS := time.Now().Unix()
+		pubTS := nowTS
 		if it.PublishedParsed != nil {
-			pubTS = it.PublishedParsed.Unix()
+			pubTS = clampPublishedTS(it.PublishedParsed.Unix(), nowTS)
 		} else if it.UpdatedParsed != nil {
-			pubTS = it.UpdatedParsed.Unix()
-		}
-		summary := it.Description
-		if summary == "" {
-			summary = it.Content
+			pubTS = clampPublishedTS(it.UpdatedParsed.Unix(), nowTS)
 		}
 		out = append(out, model.RawItem{
 			SourceName:       feed.Name,
@@ -192,6 +196,34 @@ func (p *FeedPoller) fetchRSS(ctx context.Context, feed config.FeedConfig, prevE
 		})
 	}
 	return out, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), nil
+}
+
+// clampPublishedTS prevents future-dated scheduled notices or timezone-broken feeds
+// (e.g. Beijing local time emitted as UTC) from hijacking the top of the reverse-chronological stream.
+func clampPublishedTS(ts, now int64) int64 {
+	if ts <= 0 || ts > now+300 {
+		return now
+	}
+	return ts
+}
+
+// isRoutineStatusMaintenance filters out routine scheduled PoP/datacenter maintenance notices
+// from statuspage Atom feeds while keeping real outages, incidents, and degradations.
+func isRoutineStatusMaintenance(title, summary string) bool {
+	combined := strings.ToLower(title + " " + summary)
+	isMaint := strings.Contains(combined, "scheduled maintenance") ||
+		strings.Contains(combined, "planned maintenance") ||
+		strings.Contains(combined, "maintenance window") ||
+		strings.Contains(combined, "undergo maintenance")
+	if !isMaint {
+		return false
+	}
+	for _, severe := range []string{"outage", "disruption", "degraded", "major incident", "critical", "elevated error"} {
+		if strings.Contains(combined, severe) {
+			return false
+		}
+	}
+	return true
 }
 
 // fetchWSCNLives polls WallstreetCN 7x24 public breaking news stream (free, ~60s latency).
@@ -246,7 +278,7 @@ func (p *FeedPoller) fetchWSCNLives(ctx context.Context, feed config.FeedConfig)
 			Title:            title,
 			Summary:          it.ContentText,
 			URL:              link,
-			PublishedAt:      it.DisplayTime,
+			PublishedAt:      clampPublishedTS(it.DisplayTime, time.Now().Unix()),
 			CategoryHint:     "finance",
 			BypassRuleFilter: it.Score >= 2 || feed.BypassRules,
 		})
@@ -289,9 +321,10 @@ func (p *FeedPoller) fetchCISAKEV(ctx context.Context, feed config.FeedConfig) (
 	}
 	var out []model.RawItem
 	for _, v := range payload.Vulnerabilities[start:] {
-		pubTS := time.Now().Unix()
+		nowCisa := time.Now().Unix()
+		pubTS := nowCisa
 		if t, err := time.Parse("2006-01-02", v.DateAdded); err == nil {
-			pubTS = t.Unix()
+			pubTS = clampPublishedTS(t.Unix(), nowCisa)
 		}
 		out = append(out, model.RawItem{
 			SourceName:       feed.Name,

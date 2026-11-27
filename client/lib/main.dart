@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -11,9 +12,11 @@ import 'package:window_manager/window_manager.dart';
 
 import 'core/api_client.dart';
 import 'core/app_theme.dart';
+import 'core/fluid_motion.dart';
 import 'core/markdown_view.dart';
 import 'core/models.dart';
 import 'core/updater.dart';
+import 'platform/fcm_service.dart';
 import 'platform/native_notifier.dart';
 import 'platform/windows_tray.dart';
 
@@ -51,18 +54,21 @@ class IntelHubApp extends StatefulWidget {
 
 class _IntelHubAppState extends State<IntelHubApp> {
   ThemeMode _themeMode = ThemeMode.system;
+  bool _highFpsMotion = true;
 
   @override
   void initState() {
     super.initState();
-    _loadTheme();
+    _loadDisplayPrefs();
   }
 
-  Future<void> _loadTheme() async {
+  Future<void> _loadDisplayPrefs() async {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getString('theme_mode') ?? 'system';
+    final savedHighFps = prefs.getBool('high_fps_motion') ?? true;
     if (!mounted) return;
     setState(() {
+      _highFpsMotion = savedHighFps;
       _themeMode = switch (saved) {
         'light' => ThemeMode.light,
         'dark' => ThemeMode.dark,
@@ -84,17 +90,28 @@ class _IntelHubAppState extends State<IntelHubApp> {
     );
   }
 
+  Future<void> _setHighFpsMotion(bool enabled) async {
+    setState(() => _highFpsMotion = enabled);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('high_fps_motion', enabled);
+  }
+
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'IntelHub 突发情报台',
-      debugShowCheckedModeBanner: false,
-      themeMode: _themeMode,
-      theme: AppTheme.light(),
-      darkTheme: AppTheme.dark(),
-      home: IntelShellPage(
+    return FluidMotionScope(
+      enabled: _highFpsMotion,
+      child: MaterialApp(
+        title: 'IntelHub 突发情报台',
+        debugShowCheckedModeBanner: false,
         themeMode: _themeMode,
-        onThemeModeChanged: _setThemeMode,
+        theme: AppTheme.light(),
+        darkTheme: AppTheme.dark(),
+        home: IntelShellPage(
+          themeMode: _themeMode,
+          onThemeModeChanged: _setThemeMode,
+          highFpsMotion: _highFpsMotion,
+          onHighFpsMotionChanged: _setHighFpsMotion,
+        ),
       ),
     );
   }
@@ -103,11 +120,15 @@ class _IntelHubAppState extends State<IntelHubApp> {
 class IntelShellPage extends StatefulWidget {
   final ThemeMode themeMode;
   final ValueChanged<ThemeMode> onThemeModeChanged;
+  final bool highFpsMotion;
+  final ValueChanged<bool> onHighFpsMotionChanged;
 
   const IntelShellPage({
     super.key,
     required this.themeMode,
     required this.onThemeModeChanged,
+    required this.highFpsMotion,
+    required this.onHighFpsMotionChanged,
   });
 
   @override
@@ -135,6 +156,11 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
   bool _criticalBypassQuiet = true;
   int _lastEventId = 0;
   final Set<int> _notifiedIds = <int>{};
+  String _deviceId = '';
+  String _fcmToken = '';
+  bool _serverFcmEnabled = false;
+  bool _testingFcm = false;
+  double _detectedRefreshHz = 60.0;
 
   // Server-wide Notification Policy (hot-synced to backend)
   int _serverMinScore = 8;
@@ -179,6 +205,9 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
   final ScrollController _detailScrollCtrl = ScrollController();
   final ScrollController _liveScrollCtrl = ScrollController();
   final ScrollController _archiveScrollCtrl = ScrollController();
+  final ScrollController _digestListScrollCtrl = ScrollController();
+  final ScrollController _digestContentScrollCtrl = ScrollController();
+  final ScrollController _settingsScrollCtrl = ScrollController();
   bool _webSearchInAsk = true;
 
   // Digests & Overview
@@ -245,6 +274,10 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     _liveScrollCtrl.dispose();
     _archiveScrollCtrl.dispose();
     _detailScrollCtrl.dispose();
+    _digestListScrollCtrl.dispose();
+    _digestContentScrollCtrl.dispose();
+    _settingsScrollCtrl.dispose();
+    FcmService.instance.dispose();
     _detailTick.dispose();
     _streamNotifier.dispose();
     _askingNotifier.dispose();
@@ -320,6 +353,13 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     _quietHoursRange = prefs.getString('quiet_hours_range') ?? '00:30-07:30';
     _criticalBypassQuiet = prefs.getBool('critical_bypass_quiet') ?? true;
     _lastEventId = prefs.getInt('last_seen_event_id') ?? 0;
+    var savedDeviceId = prefs.getString('client_device_id') ?? '';
+    if (savedDeviceId.isEmpty) {
+      final rnd = Random.secure().nextInt(900000) + 100000;
+      savedDeviceId = '${Platform.operatingSystem}-${DateTime.now().millisecondsSinceEpoch}-$rnd';
+      await prefs.setString('client_device_id', savedDeviceId);
+    }
+    _deviceId = savedDeviceId;
 
     _api.baseUrl = savedUrl;
     _api.apiToken = savedToken;
@@ -358,15 +398,99 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     }
     await NativeNotifier.instance.init(onTap: (code) => _openEventByCode(code));
 
+    if (Platform.isAndroid) {
+      final hz = await NativeNotifier.instance.setAndroidHighRefreshRate(widget.highFpsMotion);
+      if (mounted) setState(() => _detectedRefreshHz = hz);
+      await FcmService.instance.init(
+        onToken: (tok) {
+          _fcmToken = tok;
+          _syncDeviceToServer();
+          if (mounted) setState(() {});
+        },
+        onEventTap: (code) => _openEventByCode(code),
+        onForegroundMessage: (msg) {
+          final code = msg.data['event_code']?.toString() ?? '';
+          if (code == 'EVT-FCM-TEST') {
+            NativeNotifier.instance.showBreakingAlert(IntelEvent(
+              id: 999998,
+              eventCode: code,
+              sourceName: 'fcm',
+              category: 'ai',
+              rawTitle: msg.notification?.title ?? 'FCM Test',
+              zhTitle: msg.notification?.title ?? 'FCM 息屏推送测试成功',
+              summary: msg.notification?.body ?? '',
+              impactAnalysis: msg.notification?.body ?? 'Google FCM HTTP v1 通道已畅通。',
+              canonicalUrl: '',
+              entities: const [],
+              quoteSnapshot: const {},
+              score: 9,
+              tier: 'P1_CRITICAL',
+              isBookmarked: false,
+              userNote: '',
+              pushStatus: 'pushed',
+              verificationStatus: 'none',
+              verificationNote: '',
+              publishedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+              createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+            ));
+          }
+        },
+      );
+      if (mounted) setState(() {});
+    }
+
     if (savedUrl.isNotEmpty) {
       await _refreshLiveEvents(silent: _liveEvents.isNotEmpty);
       _connectWebSocket();
       _startFallbackPoller();
       _loadModelSettings();
       _loadNotificationPolicy();
+      _syncDeviceToServer();
       if (Platform.isAndroid && _androidKeepAlive) {
         await NativeNotifier.instance.startAndroidKeepAlive('实时在线 · 突发秒级监测中');
       }
+    }
+  }
+
+  Future<void> _syncDeviceToServer() async {
+    if (_api.baseUrl.trim().isEmpty || _deviceId.isEmpty) return;
+    try {
+      final fcmEnabled = await _api.syncDevice(
+        deviceId: _deviceId,
+        deviceName: Platform.isAndroid ? 'Android (ColorOS)' : 'Windows 11 Desktop',
+        platform: Platform.isAndroid ? 'android' : 'windows',
+        minPushScore: _minPushScore,
+        categories: _localNotifyCategories.toList(),
+        quietHours: _quietHoursEnabled ? _quietHoursRange : '',
+        fcmToken: _fcmToken,
+      );
+      if (mounted) setState(() => _serverFcmEnabled = fcmEnabled);
+    } catch (_) {}
+  }
+
+  Future<void> _testFcmPush({int delaySec = 5}) async {
+    if (_testingFcm) return;
+    setState(() => _testingFcm = true);
+    try {
+      await _syncDeviceToServer();
+      await _api.testFcmPush(deviceId: _deviceId, delaySec: delaySec);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            delaySec > 0
+                ? '已预约 $delaySec 秒后发送 FCM 高优推送，现在可立即锁屏或划掉后台验证唤醒！'
+                : 'FCM 测试推送已发出，请查看系统通知栏。',
+          ),
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('FCM 测试失败：$e')));
+      }
+    } finally {
+      if (mounted) setState(() => _testingFcm = false);
     }
   }
 
@@ -618,7 +742,8 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
   void _pushMobileDetailPage(IntelEvent fallbackEv) {
     Navigator.push(
       context,
-      MaterialPageRoute(
+      FluidPageRoute(
+        fluid: widget.highFpsMotion,
         builder: (_) => ValueListenableBuilder<int>(
           valueListenable: _detailTick,
           builder: (ctx, __, ___) => Scaffold(
@@ -1010,7 +1135,13 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
         await NativeNotifier.instance.stopAndroidKeepAlive();
       }
     }
-    await Future.wait([_refreshLiveEvents(), _loadOverview(), _loadModelSettings(), _loadNotificationPolicy()]);
+    await Future.wait([
+      _refreshLiveEvents(),
+      _loadOverview(),
+      _loadModelSettings(),
+      _loadNotificationPolicy(),
+      _syncDeviceToServer(),
+    ]);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('配置已永久保存并重新建立实时流')),
@@ -1630,35 +1761,44 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                   ? Center(child: Text('暂无匹配情报，请在「系统」页检查连接配置', style: Theme.of(context).textTheme.bodySmall))
                   : RefreshIndicator(
                       onRefresh: onRefresh,
-                      child: ListView.builder(
+                      child: FluidScrollArea(
                         controller: ctrl,
-                        cacheExtent: 800,
-                        physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
-                        padding: const EdgeInsets.fromLTRB(14, 4, 14, 24),
-                        itemCount: list.length + (loadingMore ? 1 : 0),
-                        itemBuilder: (ctx, i) {
-                          if (i >= list.length) {
-                            return const Padding(
-                              padding: EdgeInsets.symmetric(vertical: 16),
-                              child: Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))),
+                        child: ListView.builder(
+                          controller: ctrl,
+                          cacheExtent: 900,
+                          physics: fluidScrollPhysics(widget.highFpsMotion, alwaysScrollable: true),
+                          padding: const EdgeInsets.fromLTRB(14, 4, 14, 24),
+                          itemCount: list.length + (loadingMore ? 1 : 0),
+                          itemBuilder: (ctx, i) {
+                            if (i >= list.length) {
+                              return const Padding(
+                                padding: EdgeInsets.symmetric(vertical: 16),
+                                child: Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))),
+                              );
+                            }
+                            final ev = list[i];
+                            void onCardTap() {
+                              _selectEvent(ev);
+                              if (openDetailAsPage) {
+                                _pushMobileDetailPage(ev);
+                              }
+                            }
+                            return RepaintBoundary(
+                              key: ValueKey(ev.id),
+                              child: FluidInteractiveCard(
+                                animateEntrance: i < 10,
+                                entranceDelayMs: i < 8 ? i * 18 : 0,
+                                onTap: onCardTap,
+                                child: _EventCard(
+                                  event: ev,
+                                  selected: _selectedEvent?.id == ev.id,
+                                  onTap: onCardTap,
+                                  onBookmark: () => _toggleBookmark(ev),
+                                ),
+                              ),
                             );
-                          }
-                          final ev = list[i];
-                          return RepaintBoundary(
-                            key: ValueKey(ev.id),
-                            child: _EventCard(
-                              event: ev,
-                              selected: _selectedEvent?.id == ev.id,
-                              onTap: () {
-                                _selectEvent(ev);
-                                if (openDetailAsPage) {
-                                  _pushMobileDetailPage(ev);
-                                }
-                              },
-                              onBookmark: () => _toggleBookmark(ev),
-                            ),
-                          );
-                        },
+                          },
+                        ),
                       ),
                     ),
         ),
@@ -1679,10 +1819,12 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     return Column(
       children: [
         Expanded(
-          child: ListView(
+          child: FluidScrollArea(
             controller: _detailScrollCtrl,
-            physics: const BouncingScrollPhysics(),
-            padding: const EdgeInsets.all(22),
+            child: ListView(
+              controller: _detailScrollCtrl,
+              physics: fluidScrollPhysics(widget.highFpsMotion),
+              padding: const EdgeInsets.all(22),
             children: [
               Row(
                 children: [
@@ -1877,6 +2019,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                 ),
               ),
             ],
+            ),
           ),
         ),
         Container(
@@ -1947,48 +2090,56 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
         Expanded(
           child: _digests.isEmpty
               ? Center(child: Text('每日 21:00 自动汇总，也可点右上角“生成今日内参”立即生成', style: Theme.of(context).textTheme.bodySmall))
-              : ListView.builder(
-                  physics: const BouncingScrollPhysics(),
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  itemCount: _digests.length,
-                  itemBuilder: (_, i) {
-                    final d = _digests[i];
-                    final sel = _selectedDigest?.id == d.id;
-                    return Container(
-                      margin: const EdgeInsets.only(bottom: 6),
-                      decoration: BoxDecoration(
-                        color: sel ? cs.primary.withValues(alpha: 0.12) : Colors.transparent,
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      child: ListTile(
-                        title: Text(d.digestDate, style: const TextStyle(fontWeight: FontWeight.w600)),
-                        subtitle: Text('${d.title} (${d.eventCount}条)', maxLines: 1, overflow: TextOverflow.ellipsis),
-                        onTap: () {
-                          setState(() => _selectedDigest = d);
-                          if (!isWide) {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => Scaffold(
-                                  appBar: AppBar(title: Text('${d.digestDate} 内参')),
-                                  body: SafeArea(
-                                    child: ListView(
-                                      padding: const EdgeInsets.all(20),
-                                      children: [
-                                        Text(d.title, style: Theme.of(context).textTheme.headlineSmall),
-                                        const SizedBox(height: 16),
-                                        IntelMarkdownView(data: d.contentMd),
-                                      ],
+              : FluidScrollArea(
+                  controller: _digestListScrollCtrl,
+                  child: ListView.builder(
+                    controller: _digestListScrollCtrl,
+                    physics: fluidScrollPhysics(widget.highFpsMotion),
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    itemCount: _digests.length,
+                    itemBuilder: (_, i) {
+                      final d = _digests[i];
+                      final sel = _selectedDigest?.id == d.id;
+                      return AnimatedContainer(
+                        duration: Duration(milliseconds: widget.highFpsMotion ? 180 : 0),
+                        curve: Curves.easeOutCubic,
+                        margin: const EdgeInsets.only(bottom: 6),
+                        decoration: BoxDecoration(
+                          color: sel ? cs.primary.withValues(alpha: 0.12) : Colors.transparent,
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: ListTile(
+                          title: Text(d.digestDate, style: const TextStyle(fontWeight: FontWeight.w600)),
+                          subtitle: Text('${d.title} (${d.eventCount}条)', maxLines: 1, overflow: TextOverflow.ellipsis),
+                          onTap: () {
+                            setState(() => _selectedDigest = d);
+                            if (!isWide) {
+                              Navigator.push(
+                                context,
+                                FluidPageRoute(
+                                  fluid: widget.highFpsMotion,
+                                  builder: (_) => Scaffold(
+                                    appBar: AppBar(title: Text('${d.digestDate} 内参')),
+                                    body: SafeArea(
+                                      child: ListView(
+                                        physics: fluidScrollPhysics(widget.highFpsMotion),
+                                        padding: const EdgeInsets.all(20),
+                                        children: [
+                                          Text(d.title, style: Theme.of(context).textTheme.headlineSmall),
+                                          const SizedBox(height: 16),
+                                          IntelMarkdownView(data: d.contentMd),
+                                        ],
+                                      ),
                                     ),
                                   ),
                                 ),
-                              ),
-                            );
-                          }
-                        },
-                      ),
-                    );
-                  },
+                              );
+                            }
+                          },
+                        ),
+                      );
+                    },
+                  ),
                 ),
         ),
       ],
@@ -1996,14 +2147,19 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
 
     final contentWidget = _selectedDigest == null
         ? Center(child: Text('暂无选中的每日内参', style: Theme.of(context).textTheme.bodySmall))
-        : ListView(
-            padding: const EdgeInsets.all(24),
-            children: [
-              Text('${_selectedDigest!.digestDate} · ${_selectedDigest!.title}',
-                  style: Theme.of(context).textTheme.headlineSmall),
-              const SizedBox(height: 16),
-              IntelMarkdownView(data: _selectedDigest!.contentMd),
-            ],
+        : FluidScrollArea(
+            controller: _digestContentScrollCtrl,
+            child: ListView(
+              controller: _digestContentScrollCtrl,
+              physics: fluidScrollPhysics(widget.highFpsMotion),
+              padding: const EdgeInsets.all(24),
+              children: [
+                Text('${_selectedDigest!.digestDate} · ${_selectedDigest!.title}',
+                    style: Theme.of(context).textTheme.headlineSmall),
+                const SizedBox(height: 16),
+                IntelMarkdownView(data: _selectedDigest!.contentMd),
+              ],
+            ),
           );
 
     if (!isWide) return listWidget;
@@ -2032,37 +2188,81 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     }.toList()
       ..sort();
 
-    return ListView(
-      physics: const BouncingScrollPhysics(),
-      padding: const EdgeInsets.all(22),
-      children: [
-        // 1. Appearance
-        Text('外观与显示', style: Theme.of(context).textTheme.titleLarge),
+    return FluidScrollArea(
+      controller: _settingsScrollCtrl,
+      child: ListView(
+        controller: _settingsScrollCtrl,
+        physics: fluidScrollPhysics(widget.highFpsMotion),
+        padding: const EdgeInsets.all(22),
+        children: [
+        // 1. Appearance & High-Refresh-Rate Motion (synced Windows & Android)
+        Text('外观与高帧率动效', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 10),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(18),
-            child: Row(
+            child: Column(
               children: [
-                const Icon(Icons.palette_outlined),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                Row(
+                  children: [
+                    const Icon(Icons.palette_outlined),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('主题模式', style: Theme.of(context).textTheme.titleSmall),
+                          Text('支持跟随系统、日光浅色与星夜深色模式', style: Theme.of(context).textTheme.bodySmall),
+                        ],
+                      ),
+                    ),
+                    SegmentedButton<ThemeMode>(
+                      segments: const [
+                        ButtonSegment(value: ThemeMode.system, label: Text('系统')),
+                        ButtonSegment(value: ThemeMode.light, label: Text('浅色')),
+                        ButtonSegment(value: ThemeMode.dark, label: Text('深色')),
+                      ],
+                      selected: {widget.themeMode},
+                      onSelectionChanged: (s) => widget.onThemeModeChanged(s.first),
+                    ),
+                  ],
+                ),
+                const Divider(height: 24),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  secondary: Icon(Icons.speed_rounded, color: cs.primary),
+                  title: Row(
                     children: [
-                      Text('主题模式', style: Theme.of(context).textTheme.titleSmall),
-                      Text('支持跟随系统、日光浅色与星夜深色模式', style: Theme.of(context).textTheme.bodySmall),
+                      const Text('高帧率与丝滑滚动动画'),
+                      if (Platform.isAndroid && widget.highFpsMotion && _detectedRefreshHz > 61) ...[
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF10B981).withValues(alpha: 0.14),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: Text(
+                            '${_detectedRefreshHz.round()}Hz',
+                            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF10B981)),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
-                ),
-                SegmentedButton<ThemeMode>(
-                  segments: const [
-                    ButtonSegment(value: ThemeMode.system, label: Text('系统')),
-                    ButtonSegment(value: ThemeMode.light, label: Text('浅色')),
-                    ButtonSegment(value: ThemeMode.dark, label: Text('深色')),
-                  ],
-                  selected: {widget.themeMode},
-                  onSelectionChanged: (s) => widget.onThemeModeChanged(s.first),
+                  subtitle: Text(
+                    Platform.isAndroid
+                        ? '锁定屏幕最高刷新率（如 120Hz）+ 弹性阻尼、卡片入场与页面切换微动效'
+                        : '适配 120/144/240Hz 显示器的平滑滚轮缓动 + 悬停微缩放与流式过渡动画',
+                  ),
+                  value: widget.highFpsMotion,
+                  onChanged: (v) async {
+                    widget.onHighFpsMotionChanged(v);
+                    if (Platform.isAndroid) {
+                      final hz = await NativeNotifier.instance.setAndroidHighRefreshRate(v);
+                      if (mounted) setState(() => _detectedRefreshHz = hz);
+                    }
+                  },
                 ),
               ],
             ),
@@ -2332,11 +2532,42 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                     value: _winMinimizeToTray,
                     onChanged: (v) => setState(() => _winMinimizeToTray = v),
                   ),
-                if (Platform.isAndroid)
+                if (Platform.isAndroid) ...[
+                  Container(
+                    width: double.infinity,
+                    margin: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: (FcmService.instance.isAvailable ? const Color(0xFF10B981) : cs.primary)
+                          .withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: (FcmService.instance.isAvailable ? const Color(0xFF10B981) : cs.outline)
+                            .withValues(alpha: 0.45),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          FcmService.instance.isAvailable ? Icons.cloud_done_rounded : Icons.cloud_off_rounded,
+                          size: 18,
+                          color: FcmService.instance.isAvailable ? const Color(0xFF10B981) : cs.onSurface.withValues(alpha: 0.6),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            'Google FCM 息屏直推：${FcmService.instance.statusNote}'
+                            '${_serverFcmEnabled ? " · 服务端已连通" : ""}',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('ColorOS 后台常驻守护通知'),
-                    subtitle: const Text('在通知栏常驻静默守护卡片 + 每 2 分钟兜底同步，防息屏漏报'),
+                    subtitle: const Text('在通知栏常驻静默守护卡片 + 每 2 分钟兜底同步（开启 FCM 后可按需关闭）'),
                     value: _androidKeepAlive,
                     onChanged: (v) async {
                       setState(() => _androidKeepAlive = v);
@@ -2349,6 +2580,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                       }
                     },
                   ),
+                ],
                 const SizedBox(height: 10),
                 Wrap(
                   spacing: 10,
@@ -2362,9 +2594,16 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                     OutlinedButton.icon(
                       onPressed: _fireTestNotification,
                       icon: const Icon(Icons.notifications_active_rounded, size: 18),
-                      label: const Text('测试原生系统通知'),
+                      label: const Text('测试本地通知'),
                     ),
                     if (Platform.isAndroid) ...[
+                      FilledButton.tonalIcon(
+                        onPressed: _testingFcm ? null : () => _testFcmPush(delaySec: 5),
+                        icon: _testingFcm
+                            ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                            : const Icon(Icons.phonelink_ring_rounded, size: 18),
+                        label: Text(_testingFcm ? '发送中…' : '测试 FCM 息屏唤醒 (5s)'),
+                      ),
                       OutlinedButton.icon(
                         onPressed: () => NativeNotifier.instance.openAndroidNotificationSettings(),
                         icon: const Icon(Icons.settings_applications_rounded, size: 18),
@@ -2504,6 +2743,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
           ),
         ],
       ],
+      ),
     );
   }
 }
@@ -2570,7 +2810,9 @@ class _RailItem extends StatelessWidget {
       child: InkWell(
         borderRadius: BorderRadius.circular(14),
         onTap: onTap,
-        child: Container(
+        child: AnimatedContainer(
+          duration: Duration(milliseconds: FluidMotionScope.of(context) ? 180 : 0),
+          curve: Curves.easeOutCubic,
           width: double.infinity,
           padding: const EdgeInsets.symmetric(vertical: 10),
           decoration: BoxDecoration(
@@ -2611,7 +2853,9 @@ class _CompactPill extends StatelessWidget {
     return InkWell(
       borderRadius: BorderRadius.circular(999),
       onTap: onTap,
-      child: Container(
+      child: AnimatedContainer(
+        duration: Duration(milliseconds: FluidMotionScope.of(context) ? 180 : 0),
+        curve: Curves.easeOutCubic,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         decoration: BoxDecoration(
           color: selected ? cs.primary.withValues(alpha: 0.14) : cs.surface,

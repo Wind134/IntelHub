@@ -86,6 +86,13 @@ func (f *FCMNotifier) Enabled() bool {
 	return f != nil && f.sa != nil && f.privKey != nil && f.projectID != ""
 }
 
+func (f *FCMNotifier) ProjectID() string {
+	if f == nil {
+		return ""
+	}
+	return f.projectID
+}
+
 // SendToDevice dispatches a high-priority Android notification mapped to the right Notification Channel.
 func (f *FCMNotifier) SendToDevice(ctx context.Context, device model.ClientDevice, ev *model.IntelEvent) error {
 	if !f.Enabled() || device.FCMToken == "" {
@@ -120,9 +127,11 @@ func (f *FCMNotifier) SendToDevice(ctx context.Context, device model.ClientDevic
 			"android": map[string]any{
 				"priority": "HIGH",
 				"notification": map[string]any{
-					"channel_id":            channelID,
-					"notification_priority": "PRIORITY_MAX",
-					"default_sound":         true,
+					"channel_id":              channelID,
+					"icon":                    "ic_stat_intel",
+					"color":                   "#0066FF",
+					"notification_priority":   "PRIORITY_MAX",
+					"default_sound":           true,
 					"default_vibrate_timings": true,
 				},
 			},

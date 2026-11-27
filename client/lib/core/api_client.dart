@@ -179,24 +179,53 @@ class IntelApiClient {
     return ModelSettingsResponse.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
   }
 
-  Future<void> syncDevice({
+  Future<bool> syncDevice({
     required String deviceId,
     required String deviceName,
     required String platform,
     required int minPushScore,
+    List<String> categories = const ['finance', 'ai', 'bigtech', 'world'],
+    String quietHours = '',
     String fcmToken = '',
   }) async {
-    await _http.post(
-      Uri.parse('$_cleanBase/api/v1/devices/sync'),
-      headers: _headers,
-      body: jsonEncode({
-        'device_id': deviceId,
-        'device_name': deviceName,
-        'platform': platform,
-        'min_push_score': minPushScore,
-        'fcm_token': fcmToken,
-      }),
-    );
+    final resp = await _http
+        .post(
+          Uri.parse('$_cleanBase/api/v1/devices/sync'),
+          headers: _headers,
+          body: jsonEncode({
+            'device_id': deviceId,
+            'device_name': deviceName,
+            'platform': platform,
+            'min_push_score': minPushScore,
+            'categories': categories,
+            'quiet_hours': quietHours,
+            'fcm_token': fcmToken,
+          }),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (resp.statusCode != 200) {
+      throw HttpException('HTTP ${resp.statusCode}: ${resp.body}');
+    }
+    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    return data['fcm_enabled'] == true;
+  }
+
+  Future<Map<String, dynamic>> testFcmPush({String deviceId = '', int delaySec = 5}) async {
+    final resp = await _http
+        .post(
+          Uri.parse('$_cleanBase/api/v1/devices/test-fcm'),
+          headers: _headers,
+          body: jsonEncode({
+            'device_id': deviceId,
+            'delay_sec': delaySec,
+          }),
+        )
+        .timeout(const Duration(seconds: 15));
+    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    if (resp.statusCode != 200) {
+      throw HttpException(data['error']?.toString() ?? 'HTTP ${resp.statusCode}');
+    }
+    return data;
   }
 
   /// Streams SSE token deltas for single-event deep dive or cross-history RAG.
