@@ -84,6 +84,30 @@ class IntelEvent {
     );
   }
 
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'event_code': eventCode,
+        'source_name': sourceName,
+        'category': category,
+        'raw_title': rawTitle,
+        'zh_title': zhTitle,
+        'summary': summary,
+        'impact_analysis': impactAnalysis,
+        'canonical_url': canonicalUrl,
+        'entities': entities,
+        'quote_snapshot': quoteSnapshot,
+        'score': score,
+        'tier': tier,
+        'is_bookmarked': isBookmarked,
+        'user_note': userNote,
+        'push_status': pushStatus,
+        'verification_status': verificationStatus,
+        'verification_note': verificationNote,
+        'published_at': publishedAt,
+        'created_at': createdAt,
+        'snippet': snippet,
+      };
+
   IntelEvent copyWith({
     bool? isBookmarked,
     String? userNote,

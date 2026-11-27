@@ -17,6 +17,7 @@ dependencies:
   flutter_local_notifications: ^18.0.1
   local_notifier: ^0.1.6
   window_manager: ^0.4.3
+  tray_manager: ^0.2.3
   flutter_markdown_plus: ^1.0.5
 
   material_ui: any
@@ -29,3 +30,4 @@ flutter:
   uses-material-design: true
   assets:
     - assets/app_icon_squircle.png
+    - assets/app_icon.ico

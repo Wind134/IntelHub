@@ -38,6 +38,7 @@ class IntelApiClient {
     bool bookmarkedOnly = false,
     String sort = 'time_desc',
     int? beforeId,
+    int? afterId,
     int limit = 50,
   }) async {
     final params = <String, String>{
@@ -53,6 +54,7 @@ class IntelApiClient {
     if (entity != null && entity.trim().isNotEmpty) params['entity'] = entity.trim();
     if (bookmarkedOnly) params['bookmarked_only'] = '1';
     if (beforeId != null && beforeId > 0) params['before_id'] = '$beforeId';
+    if (afterId != null && afterId > 0) params['after_id'] = '$afterId';
 
     final path = (query != null && query.trim().isNotEmpty) ? '/api/v1/events/search' : '/api/v1/events';
     final uri = Uri.parse('$_cleanBase$path').replace(queryParameters: params);

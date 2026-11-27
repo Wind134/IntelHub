@@ -113,6 +113,64 @@ class NativeNotifier {
     }
   }
 
+  /// Checks whether current local time falls inside quietHours ("HH:mm-HH:mm").
+  static bool isInQuietHours(String range, {DateTime? now}) {
+    final parts = range.trim().split('-');
+    if (parts.length != 2) return false;
+    int? toMin(String hhmm) {
+      final p = hhmm.trim().split(':');
+      if (p.length != 2) return null;
+      final h = int.tryParse(p[0]);
+      final m = int.tryParse(p[1]);
+      if (h == null || m == null) return null;
+      return h * 60 + m;
+    }
+
+    final start = toMin(parts[0]);
+    final end = toMin(parts[1]);
+    if (start == null || end == null || start == end) return false;
+    final dt = now ?? DateTime.now();
+    final cur = dt.hour * 60 + dt.minute;
+    if (start < end) {
+      return cur >= start && cur < end;
+    }
+    // Crosses midnight, e.g. 00:30-07:30 or 23:30-07:30
+    return cur >= start || cur < end;
+  }
+
+  /// Coalesced burst notification when multiple breaking alerts arrived while offline/asleep.
+  Future<void> showBurstSummary(List<IntelEvent> events) async {
+    if (events.isEmpty) return;
+    if (events.length == 1) {
+      await showBreakingAlert(events.first);
+      return;
+    }
+    final top = events.reduce((a, b) => a.score >= b.score ? a : b);
+    final summaryEv = IntelEvent(
+      id: top.id,
+      eventCode: top.eventCode,
+      sourceName: top.sourceName,
+      category: top.category,
+      rawTitle: top.rawTitle,
+      zhTitle: '离线期间共 ${events.length} 条突发 · 最高 ${top.score}分：${top.zhTitle}',
+      summary: top.summary,
+      impactAnalysis: top.impactAnalysis.isNotEmpty ? top.impactAnalysis : '点击查看最新突发情报流',
+      canonicalUrl: top.canonicalUrl,
+      entities: top.entities,
+      quoteSnapshot: top.quoteSnapshot,
+      score: top.score,
+      tier: top.tier,
+      isBookmarked: top.isBookmarked,
+      userNote: top.userNote,
+      pushStatus: top.pushStatus,
+      verificationStatus: top.verificationStatus,
+      verificationNote: top.verificationNote,
+      publishedAt: top.publishedAt,
+      createdAt: top.createdAt,
+    );
+    await showBreakingAlert(summaryEv);
+  }
+
   Future<void> showBreakingAlert(IntelEvent ev) async {
     if (!_initialized) {
       await init(onTap: onNotificationTap);
