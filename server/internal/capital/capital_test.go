@@ -94,3 +94,19 @@ func TestHKCohortAndTransferDetection(t *testing.T) {
 		t.Fatalf("expected CUSTODIAN_TRANSFER detection, got flag=%s ids=%v", flag, ids)
 	}
 }
+
+func TestTushareHelpers(t *testing.T) {
+	if got := toTSCode("159919", "SZ"); got != "159919.SZ" {
+		t.Fatalf("unexpected ts code: %s", got)
+	}
+	if got := fromTSDate("20261127"); got != "2026-11-27" {
+		t.Fatalf("unexpected date: %s", got)
+	}
+	rows := parseTushareTable(
+		[]string{"ts_code", "trade_date", "fd_share"},
+		[][]any{{"159919.SZ", "20261127", 2133201.66}},
+	)
+	if len(rows) != 1 || toFloat(rows[0]["fd_share"]) != 2133201.66 {
+		t.Fatalf("unexpected parsed rows: %+v", rows)
+	}
+}

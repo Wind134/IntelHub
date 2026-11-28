@@ -18,18 +18,18 @@ import (
 
 var shanghaiTZ = time.FixedZone("Asia/Shanghai", 8*3600)
 
-// CNCollector 负责 A 股国家队核心 ETF 的双源份额校验、历史回填与两阶段放量监控。
+// CNCollector 负责 A 股国家队核心 ETF 的双源/三源份额校验、历史回填与两阶段放量监控。
 type CNCollector struct {
-	repo         *Repo
-	tushareToken string
-	http         *http.Client
+	repo *Repo
+	ts   *TushareClient
+	http *http.Client
 }
 
 func NewCNCollector(repo *Repo, tushareToken string) *CNCollector {
 	return &CNCollector{
-		repo:         repo,
-		tushareToken: strings.TrimSpace(tushareToken),
-		http:         &http.Client{Timeout: 16 * time.Second},
+		repo: repo,
+		ts:   NewTushareClient(tushareToken),
+		http: &http.Client{Timeout: 16 * time.Second},
 	}
 }
 
@@ -265,15 +265,22 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 
 	if !intradayOnly {
 		c.backfillSSEHistoricalShares(ctx, watches, "2026-11-01")
+		if c.ts.Enabled() {
+			c.backfillTushareHistoricalShares(ctx, watches, "2026-11-01")
+		}
 		c.syncInstitutionalHolders(ctx, watches)
 	}
 
+	srcLabel := "上交所官方 + 东财精确总份额 + 腾讯CDN双源核验"
+	if c.ts.Enabled() {
+		srcLabel = "上交所/东财/腾讯 + Tushare Pro fund_share 三源核验"
+	}
 	c.repo.SetSyncStatus(ctx, SyncStatus{
 		Market:      "cn_etf",
 		Status:      "ok",
 		DataAsOf:    latestDate,
 		ItemCount:   synced,
-		SourceLabel: "上交所官方 + 东财精确总份额 + 腾讯CDN双源核验",
+		SourceLabel: srcLabel,
 	})
 	return nil
 }
@@ -636,6 +643,149 @@ func (c *CNCollector) backfillHistory(ctx context.Context, w WatchItem) error {
 		})
 	}
 	return c.repo.UpsertCNETFDailyBatch(ctx, batch)
+}
+
+// backfillTushareHistoricalShares 利用 Tushare Pro fund_share 补齐深交所（及沪市三源核验）自 sinceDate 起的全部历史每日份额与净申赎。
+func (c *CNCollector) backfillTushareHistoricalShares(ctx context.Context, watches []WatchItem, sinceDate string) {
+	if !c.ts.Enabled() {
+		return
+	}
+	endDate := time.Now().In(shanghaiTZ).Format("2006-01-02")
+	// 提前一周开始拉取，确保 sinceDate 首日拥有前一个交易日的准确份额基准
+	startPull := "2026-10-20"
+	if t, err := time.Parse("2006-01-02", sinceDate); err == nil {
+		startPull = t.AddDate(0, 0, -12).Format("2006-01-02")
+	}
+
+	log.Printf("[capital:cn] backfilling ETF daily shares via Tushare Pro fund_share since %s...", sinceDate)
+	for _, w := range watches {
+		if ctx.Err() != nil {
+			return
+		}
+		series, err := c.repo.GetCNETFSeries(ctx, w.Code, 65)
+		if err != nil || len(series) < 2 {
+			continue
+		}
+		tsCode := toTSCode(w.Code, w.Exchange)
+		shareMap, err := c.ts.FetchFundShare(ctx, tsCode, startPull, endDate)
+		if err != nil {
+			log.Printf("[capital:cn] tushare fund_share %s warn: %v", tsCode, err)
+			continue
+		}
+		if len(shareMap) == 0 {
+			continue
+		}
+
+		// 若某天缺少东财净值，顺带用 Tushare fund_nav 补齐
+		var navBackup map[string]float64
+		for _, d := range series {
+			if d.TradeDate >= startPull && d.NAV <= 0 {
+				navBackup, _ = c.ts.FetchFundNAV(ctx, tsCode, startPull, endDate)
+				break
+			}
+		}
+
+		// 找到 sinceDate 之前最近一次已知份额作为基线（兼容无变动日不重复上报的会计规则）
+		var sortedTSDates []string
+		for dt := range shareMap {
+			sortedTSDates = append(sortedTSDates, dt)
+		}
+		sort.Strings(sortedTSDates)
+
+		lookupShare := func(dt string) (float64, bool) {
+			if v, ok := shareMap[dt]; ok && v > 0 {
+				return v, true
+			}
+			// 若该日无新披露记录，沿用此前最近一个已披露份额
+			last := 0.0
+			for _, d := range sortedTSDates {
+				if d <= dt {
+					last = shareMap[d]
+				} else {
+					break
+				}
+			}
+			return last, last > 0
+		}
+
+		isSZ := w.Exchange == "SZ" || !strings.HasPrefix(w.Code, "5")
+		touched := false
+		for i := range series {
+			dt := series[i].TradeDate
+			if dt < startPull {
+				continue
+			}
+			tsSh, ok := lookupShare(dt)
+			if !ok {
+				continue
+			}
+			if navBackup != nil && series[i].NAV <= 0 {
+				if nv := navBackup[dt]; nv > 0 {
+					series[i].NAV = nv
+				}
+			}
+			if isSZ {
+				series[i].TotalShares = tsSh
+				series[i].PrimaryShares = tsSh
+				series[i].VerifyStatus = "VERIFIED"
+				series[i].SourceNote = "Tushare Pro fund_share 官方历史份额"
+				touched = true
+			} else if series[i].TotalShares > 0 {
+				// 沪市已有上交所官方份额时，Tushare 作为第三独立源执行三源核验
+				diff := math.Abs(series[i].TotalShares-tsSh) / series[i].TotalShares
+				series[i].BackupShares = tsSh
+				if diff <= 0.005 {
+					series[i].VerifyStatus = "VERIFIED"
+					series[i].SourceNote = "上交所官方 + Tushare Pro 三源核验通过"
+					touched = true
+				}
+			} else {
+				series[i].TotalShares = tsSh
+				series[i].PrimaryShares = tsSh
+				series[i].VerifyStatus = "VERIFIED"
+				series[i].SourceNote = "Tushare Pro fund_share 补齐"
+				touched = true
+			}
+		}
+		if !touched {
+			continue
+		}
+
+		var updates []CNETFDaily
+		for i := 1; i < len(series); i++ {
+			if series[i].TradeDate < sinceDate {
+				if isSZ && series[i].TradeDate >= startPull {
+					updates = append(updates, series[i])
+				}
+				continue
+			}
+			if isSZ {
+				prevSh := series[i-1].TotalShares
+				curSh := series[i].TotalShares
+				if prevSh > 0 && curSh > 0 {
+					px := series[i].NAV
+					if px <= 0 {
+						px = series[i].ClosePrice
+					}
+					if math.Abs(curSh-prevSh)/prevSh <= 0.30 {
+						series[i].ShareDelta = curSh - prevSh
+						series[i].NetFlowRMB = (series[i].ShareDelta * px) / 1e8
+					}
+				}
+				var prevT []float64
+				for j := maxInt(0, i-20); j < i; j++ {
+					prevT = append(prevT, series[j].TurnoverRMB)
+				}
+				series[i].VolRatio20 = ComputeVolRatio20(series[i].TurnoverRMB, prevT, 240)
+				series[i].VolumeSignal = ClassifyVolumeSignal(series[i].VolRatio20, series[i].NetFlowRMB, false)
+			}
+			updates = append(updates, series[i])
+		}
+		if len(updates) > 0 {
+			_ = c.repo.UpsertCNETFDailyBatch(ctx, updates)
+		}
+		time.Sleep(180 * time.Millisecond)
+	}
 }
 
 var reCyrjgRow = regexp.MustCompile(`<tr><td>(\d{4}-\d{2}-\d{2})</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td></tr>`)
