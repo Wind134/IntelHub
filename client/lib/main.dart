@@ -12,6 +12,7 @@ import 'package:window_manager/window_manager.dart';
 
 import 'core/api_client.dart';
 import 'core/app_theme.dart';
+import 'core/auth_screen.dart';
 import 'core/fluid_motion.dart';
 import 'core/markdown_view.dart';
 import 'core/models.dart';
@@ -19,6 +20,7 @@ import 'core/summary_reader.dart';
 import 'core/updater.dart';
 import 'platform/fcm_service.dart';
 import 'platform/native_notifier.dart';
+import 'platform/secure_vault.dart';
 import 'platform/windows_tray.dart';
 
 // Cached static DateFormat instances to eliminate per-frame GC allocations during 120Hz scrolling.
@@ -146,6 +148,11 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
   bool _isMaximized = false;
   int _navIndex = 0; // 0: 实时流, 1: 历史库, 2: 每日内参, 3: 系统设置
   bool _wsConnected = false;
+  bool _bootstrapped = false;
+  bool _authenticated = false;
+  bool _isLegacyAuth = false;
+  String _loggedInUser = '';
+  bool _syncingCloudPrefs = false;
 
   // Local device push policy (persisted in SharedPreferences)
   int _minPushScore = 8;
@@ -340,8 +347,23 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
   Future<void> _bootstrap() async {
     // 1. Load ALL persisted settings & cached feed FIRST for <50ms instant startup!
     final prefs = await SharedPreferences.getInstance();
-    final savedUrl = prefs.getString('server_url') ?? '';
-    final savedToken = prefs.getString('api_token') ?? '';
+    var savedUrl = prefs.getString('server_url') ?? '';
+    if (savedUrl.isEmpty && kDefaultServerUrl.isNotEmpty) {
+      savedUrl = kDefaultServerUrl;
+    }
+    var savedToken = await SecureVault.instance.read('auth_token');
+    if (savedToken.isEmpty) {
+      // Seamless one-time migration of legacy plaintext token into OS hardware-encrypted SecureVault
+      final legacyTok = prefs.getString('api_token') ?? '';
+      if (legacyTok.isNotEmpty) {
+        savedToken = legacyTok;
+        await SecureVault.instance.write('auth_token', legacyTok);
+        await prefs.remove('api_token');
+      }
+    }
+    _loggedInUser = prefs.getString('auth_username') ?? '';
+    _isLegacyAuth = savedToken.isNotEmpty && !savedToken.startsWith('ihs_');
+    _authenticated = savedUrl.isNotEmpty && savedToken.isNotEmpty;
     final savedRepo = prefs.getString('github_repo');
     final effectiveRepo = (savedRepo != null && savedRepo.trim().isNotEmpty) ? savedRepo : kDefaultGithubRepo;
     final savedGhToken = prefs.getString('github_token') ?? '';
@@ -389,7 +411,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
 
     if (mounted) {
       setState(() {
-        if (savedUrl.isEmpty) _navIndex = 3;
+        _bootstrapped = true;
       });
     }
 
@@ -443,17 +465,256 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
       if (mounted) setState(() {});
     }
 
-    if (savedUrl.isNotEmpty) {
-      await _refreshLiveEvents(silent: _liveEvents.isNotEmpty);
-      _connectWebSocket();
-      _startFallbackPoller();
-      _loadModelSettings();
-      _loadNotificationPolicy();
-      _syncDeviceToServer();
-      if (Platform.isAndroid && _androidKeepAlive) {
-        await NativeNotifier.instance.startAndroidKeepAlive('实时在线 · 突发秒级监测中');
+    if (_authenticated) {
+      await _startAuthenticatedSession(pullCloudPrefs: !_isLegacyAuth);
+    }
+  }
+
+  Map<String, dynamic> _collectSyncablePreferences() => {
+        'theme_mode': switch (widget.themeMode) {
+          ThemeMode.light => 'light',
+          ThemeMode.dark => 'dark',
+          ThemeMode.system => 'system',
+        },
+        'high_fps_motion': widget.highFpsMotion,
+        'min_push_score': _minPushScore,
+        'local_notify_categories': _localNotifyCategories.toList(),
+        'quiet_hours_enabled': _quietHoursEnabled,
+        'quiet_hours_range': _quietHoursRange,
+        'critical_bypass_quiet': _criticalBypassQuiet,
+        'android_keep_alive': _androidKeepAlive,
+        'win_minimize_to_tray': _winMinimizeToTray,
+        'github_repo': _repoCtrl.text.trim(),
+      };
+
+  Future<void> _applyCloudPreferences(Map<String, dynamic> cloud) async {
+    if (cloud.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+
+    if (cloud['theme_mode'] is String) {
+      final tm = switch (cloud['theme_mode'] as String) {
+        'light' => ThemeMode.light,
+        'dark' => ThemeMode.dark,
+        _ => ThemeMode.system,
+      };
+      widget.onThemeModeChanged(tm);
+    }
+    if (cloud['high_fps_motion'] is bool) {
+      final hf = cloud['high_fps_motion'] as bool;
+      widget.onHighFpsMotionChanged(hf);
+      if (Platform.isAndroid) {
+        final hz = await NativeNotifier.instance.setAndroidHighRefreshRate(hf);
+        if (mounted) setState(() => _detectedRefreshHz = hz);
       }
     }
+    if (cloud['min_push_score'] is num) {
+      _minPushScore = (cloud['min_push_score'] as num).toInt().clamp(5, 10);
+      await prefs.setInt('min_push_score', _minPushScore);
+    }
+    if (cloud['local_notify_categories'] is List) {
+      final cats = (cloud['local_notify_categories'] as List).map((e) => e.toString()).where((e) => e.isNotEmpty).toSet();
+      if (cats.isNotEmpty) {
+        _localNotifyCategories = cats;
+        await prefs.setStringList('local_notify_categories', cats.toList());
+      }
+    }
+    if (cloud['quiet_hours_enabled'] is bool) {
+      _quietHoursEnabled = cloud['quiet_hours_enabled'] as bool;
+      await prefs.setBool('quiet_hours_enabled', _quietHoursEnabled);
+    }
+    if (cloud['quiet_hours_range'] is String && (cloud['quiet_hours_range'] as String).isNotEmpty) {
+      _quietHoursRange = cloud['quiet_hours_range'] as String;
+      _quietCtrl.text = _quietHoursRange;
+      await prefs.setString('quiet_hours_range', _quietHoursRange);
+    }
+    if (cloud['critical_bypass_quiet'] is bool) {
+      _criticalBypassQuiet = cloud['critical_bypass_quiet'] as bool;
+      await prefs.setBool('critical_bypass_quiet', _criticalBypassQuiet);
+    }
+    if (cloud['android_keep_alive'] is bool) {
+      _androidKeepAlive = cloud['android_keep_alive'] as bool;
+      await prefs.setBool('android_keep_alive', _androidKeepAlive);
+    }
+    if (cloud['win_minimize_to_tray'] is bool) {
+      _winMinimizeToTray = cloud['win_minimize_to_tray'] as bool;
+      await prefs.setBool('win_minimize_to_tray', _winMinimizeToTray);
+    }
+    if (cloud['github_repo'] is String && (cloud['github_repo'] as String).trim().isNotEmpty) {
+      _repoCtrl.text = (cloud['github_repo'] as String).trim();
+      await prefs.setString('github_repo', _repoCtrl.text);
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _pushCloudPreferences() async {
+    if (!_authenticated || _isLegacyAuth) return;
+    if (mounted) setState(() => _syncingCloudPrefs = true);
+    try {
+      await _api.updateEncryptedPreferences(_collectSyncablePreferences());
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _syncingCloudPrefs = false);
+    }
+  }
+
+  Future<void> _startAuthenticatedSession({required bool pullCloudPrefs}) async {
+    if (pullCloudPrefs) {
+      try {
+        final me = await _api.fetchAuthMe();
+        final userMap = me['user'] as Map<String, dynamic>?;
+        final cloudPrefs = (me['preferences'] as Map<String, dynamic>?) ?? const {};
+        if (userMap != null && userMap['username'] is String) {
+          _loggedInUser = userMap['username'] as String;
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('auth_username', _loggedInUser);
+        }
+        if (cloudPrefs.isNotEmpty) {
+          await _applyCloudPreferences(cloudPrefs);
+        }
+      } catch (e) {
+        if (e.toString().contains('401')) {
+          await _handleLogout(remote: false, message: '登录会话已失效，请重新输入账号密码登录');
+          return;
+        }
+      }
+    }
+
+    await _refreshLiveEvents(silent: _liveEvents.isNotEmpty);
+    _connectWebSocket();
+    _startFallbackPoller();
+    _loadModelSettings();
+    _loadNotificationPolicy();
+    _syncDeviceToServer();
+    if (Platform.isAndroid && _androidKeepAlive) {
+      await NativeNotifier.instance.startAndroidKeepAlive('实时在线 · 突发秒级监测中');
+    }
+  }
+
+  Future<void> _onAuthCompleted(AuthResult res) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('server_url', res.serverUrl);
+    await prefs.setString('auth_username', res.username);
+    await SecureVault.instance.write('auth_token', res.sessionToken);
+
+    _api.baseUrl = res.serverUrl;
+    _api.apiToken = res.sessionToken;
+    _urlCtrl.text = res.serverUrl;
+    _tokenCtrl.text = res.sessionToken;
+
+    setState(() {
+      _authenticated = true;
+      _isLegacyAuth = res.isLegacy;
+      _loggedInUser = res.username;
+      _navIndex = 0;
+    });
+
+    if (res.preferences.isNotEmpty) {
+      await _applyCloudPreferences(res.preferences);
+    } else if (!res.isLegacy) {
+      // First login on new account: upload initial encrypted preferences snapshot
+      await _pushCloudPreferences();
+    }
+    await _startAuthenticatedSession(pullCloudPrefs: false);
+  }
+
+  Future<void> _handleLogout({bool remote = true, String? message}) async {
+    if (remote && !_isLegacyAuth) {
+      await _api.logoutAccount();
+    }
+    _wsSub?.cancel();
+    _ws?.sink.close();
+    _reconnectTimer?.cancel();
+    _fallbackPollTimer?.cancel();
+    await SecureVault.instance.delete('auth_token');
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('api_token');
+    await prefs.remove('auth_username');
+    _api.apiToken = '';
+    _tokenCtrl.clear();
+    if (mounted) {
+      setState(() {
+        _authenticated = false;
+        _wsConnected = false;
+        _loggedInUser = '';
+      });
+      if (message != null && message.isNotEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+      }
+    }
+  }
+
+  Future<void> _openChangePasswordDialog() async {
+    final oldCtrl = TextEditingController();
+    final newCtrl = TextEditingController();
+    String? err;
+    bool saving = false;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlg) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Text('修改登录密码'),
+          content: SizedBox(
+            width: 380,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: oldCtrl,
+                  obscureText: true,
+                  decoration: const InputDecoration(labelText: '当前密码'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: newCtrl,
+                  obscureText: true,
+                  decoration: const InputDecoration(labelText: '新密码（至少 8 位）'),
+                ),
+                if (err != null) ...[
+                  const SizedBox(height: 10),
+                  Text(err!, style: TextStyle(color: Theme.of(ctx).colorScheme.error, fontSize: 12.5)),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+            FilledButton(
+              onPressed: saving
+                  ? null
+                  : () async {
+                      if (newCtrl.text.length < 8) {
+                        setDlg(() => err = '新密码长度至少 8 位');
+                        return;
+                      }
+                      setDlg(() {
+                        saving = true;
+                        err = null;
+                      });
+                      try {
+                        await _api.changePassword(oldPassword: oldCtrl.text, newPassword: newCtrl.text);
+                        if (ctx.mounted) Navigator.pop(ctx);
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('密码已更新，其他设备旧会话已自动下线')),
+                          );
+                        }
+                      } catch (e) {
+                        setDlg(() {
+                          saving = false;
+                          err = e.toString().replaceFirst('HttpException: ', '');
+                        });
+                      }
+                    },
+              child: Text(saving ? '提交中…' : '确认修改'),
+            ),
+          ],
+        ),
+      ),
+    );
+    oldCtrl.dispose();
+    newCtrl.dispose();
   }
 
   Future<void> _syncDeviceToServer() async {
@@ -1152,7 +1413,9 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     _quietHoursRange = _quietCtrl.text.trim().isEmpty ? '00:30-07:30' : _quietCtrl.text.trim();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('server_url', _urlCtrl.text.trim());
-    await prefs.setString('api_token', _tokenCtrl.text.trim());
+    if (_tokenCtrl.text.trim().isNotEmpty) {
+      await SecureVault.instance.write('auth_token', _tokenCtrl.text.trim());
+    }
     await prefs.setInt('min_push_score', _minPushScore);
     await prefs.setStringList('local_notify_categories', _localNotifyCategories.toList());
     await prefs.setBool('android_keep_alive', _androidKeepAlive);
@@ -1183,10 +1446,13 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
       _loadModelSettings(),
       _loadNotificationPolicy(),
       _syncDeviceToServer(),
+      _pushCloudPreferences(),
     ]);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('配置已永久保存并重新建立实时流')),
+        SnackBar(
+          content: Text(_isLegacyAuth ? '配置已永久保存并重新建立实时流' : '配置已加密同步至云端账号并重新建立实时流'),
+        ),
       );
     }
   }
@@ -1397,6 +1663,48 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
   Widget build(BuildContext context) {
     final isWide = MediaQuery.of(context).size.width >= 960;
     final cs = Theme.of(context).colorScheme;
+
+    if (!_bootstrapped) {
+      return Scaffold(
+        body: Column(
+          children: [
+            if (Platform.isWindows) _buildWindowsTitleBar(cs),
+            const Expanded(
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2.2)),
+                    SizedBox(height: 12),
+                    Text('informationHub'),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (!_authenticated) {
+      return Scaffold(
+        body: Column(
+          children: [
+            if (Platform.isWindows) _buildWindowsTitleBar(cs),
+            Expanded(
+              child: SafeArea(
+                top: !Platform.isWindows,
+                child: InformationHubAuthScreen(
+                  api: _api,
+                  initialServerUrl: _urlCtrl.text.trim().isNotEmpty ? _urlCtrl.text.trim() : kDefaultServerUrl,
+                  onAuthenticated: _onAuthCompleted,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
 
     return Scaffold(
       body: Column(
@@ -2242,7 +2550,83 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
         physics: fluidScrollPhysics(widget.highFpsMotion),
         padding: const EdgeInsets.all(22),
         children: [
-        // 1. Appearance & High-Refresh-Rate Motion (synced Windows & Android)
+        // 0. Account & Encrypted Cloud Config Binding
+        Text('账号与加密云同步', style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 10),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: _ResponsiveSettingRow(
+              leading: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  CircleAvatar(
+                    radius: 22,
+                    backgroundColor: cs.primary.withValues(alpha: 0.14),
+                    child: Icon(
+                      _isLegacyAuth ? Icons.vpn_key_rounded : Icons.verified_user_rounded,
+                      color: cs.primary,
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _loggedInUser.isNotEmpty ? _loggedInUser : (_isLegacyAuth ? '传统 API Token 模式' : '已认证账号'),
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          _isLegacyAuth
+                              ? '当前为旧版 Token 直连；退出后可切换为账号密码加密登录'
+                              : '个人偏好已绑定账号并以 AES-256-GCM 加密云端同步 · 凭据受 ${Platform.isAndroid ? "Android Keystore" : "Windows DPAPI"} 保护',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              trailing: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  if (!_isLegacyAuth) ...[
+                    OutlinedButton.icon(
+                      onPressed: _syncingCloudPrefs ? null : () async {
+                        await _pushCloudPreferences();
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('已将当前配置 AES-256-GCM 加密同步到云端账号')),
+                          );
+                        }
+                      },
+                      icon: _syncingCloudPrefs
+                          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.cloud_sync_rounded, size: 17),
+                      label: const Text('立即同步'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _openChangePasswordDialog,
+                      icon: const Icon(Icons.password_rounded, size: 17),
+                      label: const Text('改密'),
+                    ),
+                  ],
+                  OutlinedButton.icon(
+                    onPressed: () => _handleLogout(remote: true, message: '已安全退出登录'),
+                    icon: Icon(Icons.logout_rounded, size: 17, color: cs.error),
+                    label: Text('退出登录', style: TextStyle(color: cs.error)),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 22),
+
+        // 1. Appearance & High-Refresh-Rate Motion
         Text('外观与高帧率动效', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 10),
         Card(
@@ -2250,29 +2634,34 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
             padding: const EdgeInsets.all(18),
             child: Column(
               children: [
-                Row(
-                  children: [
-                    const Icon(Icons.palette_outlined),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('主题模式', style: Theme.of(context).textTheme.titleSmall),
-                          Text('支持跟随系统、日光浅色与星夜深色模式', style: Theme.of(context).textTheme.bodySmall),
-                        ],
+                _ResponsiveSettingRow(
+                  leading: Row(
+                    children: [
+                      const Icon(Icons.palette_outlined),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('主题模式', style: Theme.of(context).textTheme.titleSmall),
+                            Text('支持跟随系统、日光浅色与星夜深色模式', style: Theme.of(context).textTheme.bodySmall),
+                          ],
+                        ),
                       ),
-                    ),
-                    SegmentedButton<ThemeMode>(
-                      segments: const [
-                        ButtonSegment(value: ThemeMode.system, label: Text('系统')),
-                        ButtonSegment(value: ThemeMode.light, label: Text('浅色')),
-                        ButtonSegment(value: ThemeMode.dark, label: Text('深色')),
-                      ],
-                      selected: {widget.themeMode},
-                      onSelectionChanged: (s) => widget.onThemeModeChanged(s.first),
-                    ),
-                  ],
+                    ],
+                  ),
+                  trailing: SegmentedButton<ThemeMode>(
+                    segments: const [
+                      ButtonSegment(value: ThemeMode.system, label: Text('系统')),
+                      ButtonSegment(value: ThemeMode.light, label: Text('浅色')),
+                      ButtonSegment(value: ThemeMode.dark, label: Text('深色')),
+                    ],
+                    selected: {widget.themeMode},
+                    onSelectionChanged: (s) {
+                      widget.onThemeModeChanged(s.first);
+                      _pushCloudPreferences();
+                    },
+                  ),
                 ),
                 const Divider(height: 24),
                 SwitchListTile(
@@ -2309,6 +2698,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                       final hz = await NativeNotifier.instance.setAndroidHighRefreshRate(v);
                       if (mounted) setState(() => _detectedRefreshHz = hz);
                     }
+                    _pushCloudPreferences();
                   },
                 ),
               ],
@@ -2320,8 +2710,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
         // 2. Global Server Notification Level & Category Policy
         Row(
           children: [
-            Text('全局消息通知级别与领域（同步服务端）', style: Theme.of(context).textTheme.titleLarge),
-            const Spacer(),
+            Expanded(child: Text('全局消息通知级别与领域（同步服务端）', style: Theme.of(context).textTheme.titleLarge)),
             IconButton(tooltip: '刷新服务端通知策略', onPressed: _loadNotificationPolicy, icon: const Icon(Icons.refresh_rounded, size: 18)),
           ],
         ),
@@ -2417,8 +2806,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
         // 3. Isolated 3-Slot LLM Model Service
         Row(
           children: [
-            Text('AI 模型服务配置（实时同步后端）', style: Theme.of(context).textTheme.titleLarge),
-            const Spacer(),
+            Expanded(child: Text('AI 模型服务配置（实时同步后端）', style: Theme.of(context).textTheme.titleLarge)),
             IconButton(tooltip: '重新拉取订阅模型列表', onPressed: _loadModelSettings, icon: const Icon(Icons.refresh_rounded, size: 18)),
           ],
         ),
@@ -2550,27 +2938,22 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                   value: _quietHoursEnabled,
                   onChanged: (v) => setState(() => _quietHoursEnabled = v),
                 ),
-                if (_quietHoursEnabled) ...[
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _quietCtrl,
-                          decoration: const InputDecoration(labelText: '免打扰时段 (HH:mm-HH:mm)', hintText: '00:30-07:30'),
-                        ),
+                if (_quietHoursEnabled)
+                  _ResponsiveSettingRow(
+                    leading: TextField(
+                      controller: _quietCtrl,
+                      decoration: const InputDecoration(labelText: '免打扰时段 (HH:mm-HH:mm)', hintText: '00:30-07:30'),
+                    ),
+                    trailing: SizedBox(
+                      width: 220,
+                      child: SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('9-10分特急突破免打扰', style: TextStyle(fontSize: 13)),
+                        value: _criticalBypassQuiet,
+                        onChanged: (v) => setState(() => _criticalBypassQuiet = v),
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: SwitchListTile(
-                          contentPadding: EdgeInsets.zero,
-                          title: const Text('9-10分特急突破免打扰', style: TextStyle(fontSize: 13)),
-                          value: _criticalBypassQuiet,
-                          onChanged: (v) => setState(() => _criticalBypassQuiet = v),
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
-                ],
                 if (Platform.isWindows)
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
@@ -3074,6 +3457,40 @@ class _ThreadBubble extends StatelessWidget {
       child: isUser
           ? SelectableText(msg.contentMd, style: Theme.of(context).textTheme.bodyMedium)
           : IntelMarkdownView(data: msg.contentMd),
+    );
+  }
+}
+
+/// 响应式设置项容器：宽屏左右并排，窄屏上下折行，防止手机端挤压文字。
+class _ResponsiveSettingRow extends StatelessWidget {
+  final Widget leading;
+  final Widget trailing;
+
+  const _ResponsiveSettingRow({required this.leading, required this.trailing});
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (_, constraints) {
+        if (constraints.maxWidth < 540) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              leading,
+              const SizedBox(height: 12),
+              trailing,
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(child: leading),
+            const SizedBox(width: 16),
+            trailing,
+          ],
+        );
+      },
     );
   }
 }

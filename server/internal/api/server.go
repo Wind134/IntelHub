@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,8 +33,9 @@ type Server struct {
 	feishu   *notifier.FeishuNotifier
 	fcm      *notifier.FCMNotifier
 
-	policyMu sync.RWMutex
-	policy   model.NotificationPolicy
+	policyMu    sync.RWMutex
+	policy      model.NotificationPolicy
+	authLimiter *authRateLimiter
 }
 
 func NewServer(cfg *config.Config, st *store.Store, hub *Hub, sc *scorer.Client, en *pipeline.Enricher, feishu *notifier.FeishuNotifier, fcm *notifier.FCMNotifier) *Server {
@@ -42,13 +44,14 @@ func NewServer(cfg *config.Config, st *store.Store, hub *Hub, sc *scorer.Client,
 		minScore = 8
 	}
 	return &Server{
-		cfg:      cfg,
-		store:    st,
-		hub:      hub,
-		scorer:   sc,
-		enricher: en,
-		feishu:   feishu,
-		fcm:      fcm,
+		cfg:         cfg,
+		store:       st,
+		hub:         hub,
+		scorer:      sc,
+		enricher:    en,
+		feishu:      feishu,
+		fcm:         fcm,
+		authLimiter: newAuthRateLimiter(),
 		policy: model.NotificationPolicy{
 			MinPushScore:           minScore,
 			Categories:             []string{"finance", "ai", "bigtech", "world"},
@@ -213,6 +216,13 @@ func (s *Server) OnEventVerified(ctx context.Context, ev *model.IntelEvent) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
+	mux.HandleFunc("GET /api/v1/auth/status", s.handleAuthStatus)
+	mux.HandleFunc("POST /api/v1/auth/register", s.handleAuthRegister)
+	mux.HandleFunc("POST /api/v1/auth/login", s.handleAuthLogin)
+	mux.HandleFunc("POST /api/v1/auth/logout", s.auth(s.handleAuthLogout))
+	mux.HandleFunc("GET /api/v1/auth/me", s.auth(s.handleAuthMe))
+	mux.HandleFunc("PUT /api/v1/auth/preferences", s.auth(s.handleUpdatePreferences))
+	mux.HandleFunc("POST /api/v1/auth/change-password", s.auth(s.handleChangePassword))
 	mux.HandleFunc("GET /api/v1/events", s.auth(s.handleListEvents))
 	mux.HandleFunc("GET /api/v1/events/search", s.auth(s.handleSearchEvents))
 	mux.HandleFunc("GET /api/v1/events/{code}", s.auth(s.handleGetEvent))
@@ -237,19 +247,40 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		expected := strings.TrimSpace(s.cfg.Server.APIToken)
-		if expected == "" {
-			next(w, r)
-			return
-		}
 		tok := strings.TrimPrefix(strings.TrimSpace(r.Header.Get("Authorization")), "Bearer ")
 		if tok == "" {
 			tok = strings.TrimSpace(r.URL.Query().Get("token"))
 		}
-		if tok != expected {
+
+		// 1. Check user session token first (ihs_...)
+		if strings.HasPrefix(tok, "ihs_") {
+			sess, err := s.store.ValidateSessionToken(r.Context(), tok)
+			if err == nil && sess != nil {
+				ctx := context.WithValue(r.Context(), authContextKey{}, authPrincipal{
+					UserID:   sess.UserID,
+					Username: sess.Username,
+					IsLegacy: false,
+					RawToken: tok,
+				})
+				next(w, r.WithContext(ctx))
+				return
+			}
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "登录会话已失效，请重新登录"})
+			return
+		}
+
+		// 2. Fallback: legacy static INTEL_API_TOKEN (keeps Hermes CLI, sentinel, and old clients working)
+		if expected == "" {
+			ctx := context.WithValue(r.Context(), authContextKey{}, authPrincipal{IsLegacy: true})
+			next(w, r.WithContext(ctx))
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(tok), []byte(expected)) != 1 {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
-		next(w, r)
+		ctx := context.WithValue(r.Context(), authContextKey{}, authPrincipal{IsLegacy: true, RawToken: tok})
+		next(w, r.WithContext(ctx))
 	}
 }
 

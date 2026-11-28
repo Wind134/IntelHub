@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 
 const String kAppVersion = String.fromEnvironment('APP_VERSION', defaultValue: '1.0.0');
 const String kDefaultGithubRepo = String.fromEnvironment('GITHUB_REPO', defaultValue: 'Wind134/IntelHub');
+const String kDefaultServerUrl = String.fromEnvironment('DEFAULT_SERVER_URL', defaultValue: '');
 
 class ReleaseInfo {
   final String tagName;

@@ -5,20 +5,66 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
 import android.view.Display
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 class MainActivity : FlutterActivity() {
     private val channelName = "io.intelhub.client/native"
+    private val secureChannelName = "io.intelhub.client/secure"
+    private val keyAlias = "informationhub_local_vault_key_v1"
     private var currentRefreshRate: Float = 60.0f
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Enable native highest display refresh rate (e.g. 120Hz on ColorOS LTPO) by default.
         applyHighRefreshRate(true)
+    }
+
+    private fun getOrCreateKeystoreKey(): SecretKey {
+        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        val existing = ks.getEntry(keyAlias, null) as? KeyStore.SecretKeyEntry
+        if (existing != null) return existing.secretKey
+
+        val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+        val spec = KeyGenParameterSpec.Builder(
+            keyAlias,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .build()
+        gen.init(spec)
+        return gen.generateKey()
+    }
+
+    private fun keystoreEncrypt(plain: String): String {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKeystoreKey())
+        val iv = cipher.iv
+        val enc = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
+        return Base64.encodeToString(iv, Base64.NO_WRAP) + ":" + Base64.encodeToString(enc, Base64.NO_WRAP)
+    }
+
+    private fun keystoreDecrypt(packed: String): String {
+        val parts = packed.split(":")
+        if (parts.size != 2) throw IllegalArgumentException("invalid cipher blob")
+        val iv = Base64.decode(parts[0], Base64.NO_WRAP)
+        val enc = Base64.decode(parts[1], Base64.NO_WRAP)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, getOrCreateKeystoreKey(), GCMParameterSpec(128, iv))
+        val plain = cipher.doFinal(enc)
+        return String(plain, Charsets.UTF_8)
     }
 
     private fun applyHighRefreshRate(enabled: Boolean): Double {
@@ -44,7 +90,6 @@ class MainActivity : FlutterActivity() {
                 return 60.0
             }
 
-            // Pick the highest refresh-rate mode that preserves current physical resolution.
             val bestMode = activeDisplay.supportedModes
                 .filter {
                     it.physicalWidth == currentMode.physicalWidth &&
@@ -67,6 +112,26 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, secureChannelName)
+            .setMethodCallHandler { call, result ->
+                try {
+                    when (call.method) {
+                        "encrypt" -> {
+                            val plain = call.argument<String>("plain") ?: ""
+                            result.success(keystoreEncrypt(plain))
+                        }
+                        "decrypt" -> {
+                            val cipher = call.argument<String>("cipher") ?: ""
+                            result.success(keystoreDecrypt(cipher))
+                        }
+                        else -> result.notImplemented()
+                    }
+                } catch (e: Exception) {
+                    result.error("KEYSTORE_ERROR", e.message, null)
+                }
+            }
+
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {

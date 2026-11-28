@@ -1,9 +1,10 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
-/// Inherited toggle for synchronized High-Frame-Rate & Fluid Motion mode across Windows & Android.
 class FluidMotionScope extends InheritedWidget {
   final bool enabled;
 
@@ -21,9 +22,6 @@ class FluidMotionScope extends InheritedWidget {
   bool updateShouldNotify(FluidMotionScope oldWidget) => enabled != oldWidget.enabled;
 }
 
-/// Returns platform-tuned high-FPS scroll physics:
-/// - Fluid mode ON: buttery spring BouncingScrollPhysics (fast deceleration, ColorOS/iOS feel)
-/// - Fluid mode OFF: standard ClampingScrollPhysics (power-saving / minimal motion)
 ScrollPhysics fluidScrollPhysics(bool enabled, {bool alwaysScrollable = false}) {
   final base = enabled
       ? const BouncingScrollPhysics(decelerationRate: ScrollDecelerationRate.fast)
@@ -31,9 +29,7 @@ ScrollPhysics fluidScrollPhysics(bool enabled, {bool alwaysScrollable = false}) 
   return alwaysScrollable ? AlwaysScrollableScrollPhysics(parent: base) : base;
 }
 
-/// High-refresh-rate desktop mouse-wheel smooth scroller (120Hz / 144Hz / 240Hz):
-/// Intercepts stepped mouse-wheel ticks on Windows and interpolates them smoothly with easeOutCubic
-/// while leaving touch/trackpad gestures native and instant.
+/// Windows 高刷惯性滚轮容器：基于 vsync Ticker 的指数阻尼插值，支持连续拨轮叠加动量，无 animateTo 重启卡顿。
 class FluidScrollArea extends StatefulWidget {
   final ScrollController controller;
   final Widget child;
@@ -48,33 +44,87 @@ class FluidScrollArea extends StatefulWidget {
   State<FluidScrollArea> createState() => _FluidScrollAreaState();
 }
 
-class _FluidScrollAreaState extends State<FluidScrollArea> {
+class _FluidScrollAreaState extends State<FluidScrollArea> with SingleTickerProviderStateMixin {
+  late final Ticker _ticker;
   double _targetOffset = 0;
+  Duration _lastTick = Duration.zero;
   DateTime _lastWheelAt = DateTime.fromMillisecondsSinceEpoch(0);
+  double _streakBoost = 1.0;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = createTicker(_onTick);
+  }
+
+  @override
+  void dispose() {
+    _ticker.dispose();
+    super.dispose();
+  }
+
+  void _stopMomentum() {
+    if (_ticker.isActive) {
+      _ticker.stop();
+    }
+    _lastTick = Duration.zero;
+    _streakBoost = 1.0;
+  }
+
+  void _onTick(Duration elapsed) {
+    if (!mounted || !widget.controller.hasClients) {
+      _stopMomentum();
+      return;
+    }
+    final pos = widget.controller.position;
+    final dt = _lastTick == Duration.zero
+        ? (1.0 / 120.0)
+        : ((elapsed - _lastTick).inMicroseconds / 1000000.0).clamp(0.001, 0.05);
+    _lastTick = elapsed;
+
+    final clampedTarget = _targetOffset.clamp(pos.minScrollExtent, pos.maxScrollExtent);
+    _targetOffset = clampedTarget;
+    final diff = clampedTarget - pos.pixels;
+
+    if (diff.abs() < 0.35) {
+      if ((pos.pixels - clampedTarget).abs() > 0.01) {
+        widget.controller.jumpTo(clampedTarget);
+      }
+      _stopMomentum();
+      return;
+    }
+
+    // 帧率无关指数衰减（9.2 阻尼系数提供类似移动端惯性滑行收尾感）
+    final factor = 1.0 - math.exp(-9.2 * dt);
+    final next = (pos.pixels + diff * factor).clamp(pos.minScrollExtent, pos.maxScrollExtent);
+    widget.controller.jumpTo(next);
+  }
 
   void _handlePointerSignal(PointerSignalEvent event, bool fluidEnabled) {
     if (!fluidEnabled || !Platform.isWindows) return;
-    if (event is! PointerScrollEvent) return;
-    if (event.kind != PointerDeviceKind.mouse) return;
+    if (event is! PointerScrollEvent || event.kind != PointerDeviceKind.mouse) return;
     if (!widget.controller.hasClients) return;
 
     final pos = widget.controller.position;
     final now = DateTime.now();
-    // Reset target anchor if user stopped scrolling or dragged scrollbar manually
-    if (now.difference(_lastWheelAt).inMilliseconds > 260) {
-      _targetOffset = pos.pixels;
-    }
+    final gapMs = now.difference(_lastWheelAt).inMilliseconds;
     _lastWheelAt = now;
 
-    // Slight boost for crisp, responsive desktop glide
-    final delta = event.scrollDelta.dy * 1.18;
+    if (!_ticker.isActive || gapMs > 320) {
+      _targetOffset = pos.pixels;
+      _streakBoost = 1.0;
+    } else if (gapMs < 130) {
+      // 连续快速拨轮渐进增强惯性距离，上限 1.85 倍
+      _streakBoost = (_streakBoost + 0.14).clamp(1.0, 1.85);
+    }
+
+    final delta = event.scrollDelta.dy * 1.42 * _streakBoost;
     _targetOffset = (_targetOffset + delta).clamp(pos.minScrollExtent, pos.maxScrollExtent);
 
-    widget.controller.animateTo(
-      _targetOffset,
-      duration: const Duration(milliseconds: 220),
-      curve: Curves.easeOutCubic,
-    );
+    if (!_ticker.isActive) {
+      _lastTick = Duration.zero;
+      _ticker.start();
+    }
   }
 
   @override
@@ -84,14 +134,13 @@ class _FluidScrollAreaState extends State<FluidScrollArea> {
       return widget.child;
     }
     return Listener(
+      onPointerDown: (_) => _stopMomentum(),
       onPointerSignal: (ev) => _handlePointerSignal(ev, enabled),
       child: widget.child,
     );
   }
 }
 
-/// GPU-composited card entrance glide (fade + subtle 14px slide) + hover lift + tap micro-scale.
-/// Runs purely on transform/opacity layers so 120fps scrolling never triggers relayout.
 class FluidInteractiveCard extends StatefulWidget {
   final Widget child;
   final VoidCallback onTap;
@@ -157,9 +206,7 @@ class _FluidInteractiveCardState extends State<FluidInteractiveCard> with Single
   @override
   Widget build(BuildContext context) {
     final fluid = FluidMotionScope.of(context);
-    if (!fluid) {
-      return widget.child;
-    }
+    if (!fluid) return widget.child;
 
     final scale = _pressed ? 0.985 : (_hovered ? 1.006 : 1.0);
     return FadeTransition(
@@ -186,7 +233,6 @@ class _FluidInteractiveCardState extends State<FluidInteractiveCard> with Single
   }
 }
 
-/// Custom ColorOS / Windows fluid page route (smooth 280ms slide + gentle scale + fade).
 class FluidPageRoute<T> extends PageRouteBuilder<T> {
   FluidPageRoute({
     required WidgetBuilder builder,
@@ -202,17 +248,12 @@ class FluidPageRoute<T> extends PageRouteBuilder<T> {
               curve: Curves.easeOutCubic,
               reverseCurve: Curves.easeInCubic,
             );
-            final slide = Tween<Offset>(
-              begin: const Offset(0.08, 0),
-              end: Offset.zero,
-            ).animate(curved);
-            final scale = Tween<double>(begin: 0.98, end: 1.0).animate(curved);
             return FadeTransition(
               opacity: curved,
               child: SlideTransition(
-                position: slide,
+                position: Tween<Offset>(begin: const Offset(0.08, 0), end: Offset.zero).animate(curved),
                 child: ScaleTransition(
-                  scale: scale,
+                  scale: Tween<double>(begin: 0.98, end: 1.0).animate(curved),
                   child: child,
                 ),
               ),
