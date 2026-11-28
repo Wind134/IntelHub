@@ -5,8 +5,6 @@ import {
   AlertTriangle,
   CheckCircle2,
   ChevronRight,
-  Landmark,
-  ShieldCheck,
   TrendingUp,
   X,
 } from 'lucide-react';
@@ -287,46 +285,60 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
 
   return (
     <div className="space-y-4">
-      {/* KPI 卡片：手机端 2 列，桌面端 4 列 */}
+      {/* KPI 卡片：手机端 2 列，桌面端 4 列（附清晰时效分层徽章） */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <div className="p-3.5 sm:p-4 rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] shadow-xs">
-          <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-            <span>监控池机构持仓重估</span>
-            <Landmark className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+          <div className="flex items-center justify-between gap-1 text-xs text-slate-500 dark:text-slate-400">
+            <span className="truncate">监控池机构持仓重估</span>
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300 whitespace-nowrap">
+              中报/年报
+            </span>
           </div>
           <div className="mt-1.5 text-lg sm:text-xl font-bold tabular-nums tracking-tight">
             {fmtRMBYi(kpi.govTotal)}
           </div>
-          <div className="mt-1 text-[11px] text-slate-400">官方中报/年报机构占比 × 最新规模</div>
+          <div className="mt-1 text-[11px] text-slate-400">官方定期报告机构占比 × 最新规模</div>
         </div>
 
         <div className="p-3.5 sm:p-4 rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] shadow-xs">
-          <div className="text-xs text-slate-500 dark:text-slate-400">监控池日净申赎</div>
+          <div className="flex items-center justify-between gap-1 text-xs text-slate-500 dark:text-slate-400">
+            <span className="truncate">监控池日净申赎</span>
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300 whitespace-nowrap">
+              收盘日更
+            </span>
+          </div>
           <div className={`mt-1.5 text-lg sm:text-xl font-bold tabular-nums tracking-tight ${flowColorClass(kpi.flow1d)}`}>
             {fmtRMBYi(kpi.flow1d, true)}
           </div>
           <div className="mt-1 text-[11px] text-slate-400">
-            数据日 {kpi.latestDate || '待同步'} · RMB
+            数据日 {kpi.latestDate || '待同步'} · 19:30/次晨08:45(北京)
           </div>
         </div>
 
         <div className="p-3.5 sm:p-4 rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] shadow-xs">
-          <div className="text-xs text-slate-500 dark:text-slate-400">{winLabel}累计净流向</div>
+          <div className="flex items-center justify-between gap-1 text-xs text-slate-500 dark:text-slate-400">
+            <span className="truncate">{winLabel}累计净流向</span>
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300 whitespace-nowrap">
+              收盘日更
+            </span>
+          </div>
           <div className={`mt-1.5 text-lg sm:text-xl font-bold tabular-nums tracking-tight ${flowColorClass(kpi.flowWin)}`}>
             {fmtRMBYi(kpi.flowWin, true)}
           </div>
-          <div className="mt-1 text-[11px] text-slate-400">官方份额变动折算</div>
+          <div className="mt-1 text-[11px] text-slate-400">官方份额变动折算 · RMB</div>
         </div>
 
         <div className="p-3.5 sm:p-4 rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] shadow-xs">
-          <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-            <span>放量异动信号</span>
-            <ShieldCheck className="w-3.5 h-3.5 text-amber-500" />
+          <div className="flex items-center justify-between gap-1 text-xs text-slate-500 dark:text-slate-400">
+            <span className="truncate">放量异动信号</span>
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300 whitespace-nowrap">
+              盘中5分钟
+            </span>
           </div>
           <div className="mt-1.5 text-lg sm:text-xl font-bold tabular-nums tracking-tight">
             {kpi.surgeCount} <span className="text-xs font-normal text-slate-400">/ {items.length} 只</span>
           </div>
-          <div className="mt-1 text-[11px] text-slate-400">盘中折算量比 ≥ 2.5x</div>
+          <div className="mt-1 text-[11px] text-slate-400">交易时段折算量比 ≥ 2.5x(北京)</div>
         </div>
       </div>
 

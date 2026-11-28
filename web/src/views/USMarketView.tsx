@@ -206,6 +206,17 @@ export const USMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
 
   return (
     <div className="space-y-4">
+      {/* 时效与时区提示栏 */}
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 rounded-2xl bg-slate-100/80 dark:bg-slate-900/60 border border-[var(--border-subtle)] text-xs">
+        <div className="flex items-center gap-2 text-slate-600 dark:text-slate-300">
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-100 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 whitespace-nowrap">
+            季报 13F-HR
+          </span>
+          <span>每季度结束后 45 日内强制披露 · 按<strong>美东时间 (ET)</strong> 08:30 / 18:15 自动巡检 SEC EDGAR</span>
+        </div>
+        <span className="text-[11px] text-slate-400">计价单位：美元 USD</span>
+      </div>
+
       {/* KPI */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <div className="p-3.5 sm:p-4 rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)]">

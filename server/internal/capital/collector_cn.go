@@ -116,9 +116,9 @@ func ElapsedCNTradingMinutes(now time.Time) (int, bool) {
 		}
 		return m, true
 	}
-	// 午休 11:30 - 13:00
+	// 午休 11:31 - 12:59 不再轮询上游，静默等待下午开盘
 	if minOfDay > 690 && minOfDay < 780 {
-		return 120, true
+		return 120, false
 	}
 	// 下午 13:00 (780) - 15:00 (900)
 	if minOfDay >= 780 && minOfDay < 900 {
@@ -142,19 +142,75 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 		return nil
 	}
 
-	// 1. 批量拉取东财精确总份额 f38 + 实时价 f2 + 成交额 f6
-	c.report(5, 100, "拉取东财/腾讯/上交所实时份额与净值...")
+	// 1. 批量拉取东财精确总份额 f38 + 实时价 f2 + 成交额 f6（盘中仅发这 1 次批量请求）
+	c.report(5, 100, "拉取实时行情与官方份额...")
 	emMap, err := c.fetchEastmoneyQuotes(ctx, watches)
 	if err != nil {
-		c.repo.SetSyncStatus(ctx, SyncStatus{Market: "cn_etf", Status: "error", ErrorMsg: err.Error(), SourceLabel: "SSE/东财/腾讯双源"})
+		if !intradayOnly {
+			c.repo.SetSyncStatus(ctx, SyncStatus{Market: "cn_etf", Status: "error", ErrorMsg: err.Error(), SourceLabel: "SSE/东财/腾讯双源"})
+		}
 		return err
 	}
+
+	todayBJ := time.Now().In(shanghaiTZ).Format("2006-01-02")
+
+	// 盘中轻量模式：仅使用上述 1 次批量请求更新实时价、实时成交额与折算量比，不碰交易所/净值/Tushare，不污染前日精确份额
+	if intradayOnly {
+		var updates []CNETFDaily
+		for _, w := range watches {
+			em, ok := emMap[w.Code]
+			if !ok || em.TurnoverRMB <= 0 {
+				continue
+			}
+			existing, _ := c.repo.GetCNETFSeries(ctx, w.Code, 25)
+			var prevTurnovers []float64
+			prevShares := em.Shares
+			prevNAV := em.Close
+			for _, row := range existing {
+				if row.TradeDate < todayBJ {
+					if row.TotalShares > 0 {
+						prevShares = row.TotalShares
+					}
+					if row.NAV > 0 {
+						prevNAV = row.NAV
+					}
+					if row.TurnoverRMB > 0 {
+						prevTurnovers = append(prevTurnovers, row.TurnoverRMB)
+					}
+				}
+			}
+			if len(prevTurnovers) > 20 {
+				prevTurnovers = prevTurnovers[len(prevTurnovers)-20:]
+			}
+			volRatio := ComputeVolRatio20(em.TurnoverRMB, prevTurnovers, elapsedMin)
+			sig := ClassifyVolumeSignal(volRatio, 0, true)
+			updates = append(updates, CNETFDaily{
+				Code:          w.Code,
+				TradeDate:     todayBJ,
+				TotalShares:   prevShares,
+				ShareDelta:    0,
+				NAV:           prevNAV,
+				ClosePrice:    em.Close,
+				TurnoverRMB:   em.TurnoverRMB,
+				NetFlowRMB:    0,
+				VolRatio20:    volRatio,
+				VolumeSignal:  sig,
+				IsIntraday:    true,
+				VerifyStatus:  "SINGLE_SOURCE",
+				SourceNote:    "盘中实时成交量比观测（份额净申赎待收盘后官方清算）",
+				PrimaryShares: prevShares,
+			})
+		}
+		if len(updates) > 0 {
+			_ = c.repo.UpsertCNETFDailyBatch(ctx, updates)
+		}
+		return nil
+	}
+
 	// 2. 批量拉取腾讯 CDN 行情（用于深市反算核验 + 备源）
 	txMap, _ := c.fetchTencentQuotes(ctx, watches)
 	// 3. 拉取上交所官方每日 ETF 规模（沪市主源）
 	sseMap, sseDate, _ := c.fetchSSEScaleMapByDate(ctx, "")
-
-	todayBJ := time.Now().In(shanghaiTZ).Format("2006-01-02")
 	latestDate := sseDate
 	if latestDate == "" {
 		latestDate = todayBJ

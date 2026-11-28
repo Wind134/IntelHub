@@ -5,7 +5,22 @@ import (
 	"log"
 	"sync"
 	"time"
+	_ "time/tzdata"
 )
+
+var newYorkTZ = loadNewYorkTZ()
+
+func loadNewYorkTZ() *time.Location {
+	if loc, err := time.LoadLocation("America/New_York"); err == nil {
+		return loc
+	}
+	return time.FixedZone("America/New_York", -5*3600)
+}
+
+func isWeekday(t time.Time) bool {
+	wd := t.Weekday()
+	return wd != time.Saturday && wd != time.Sunday
+}
 
 // ProgressFunc 用于采集器向调度引擎上报细粒度同步进度。
 type ProgressFunc func(cur, total int, stage string)
@@ -161,39 +176,52 @@ func (e *Engine) Start(ctx context.Context) {
 		}
 	}()
 
-	// 定时错峰巡检（按北京时间调度）
+	// 定时错峰巡检：A股/港股严格按北京时间(UTC+8)，美股严格按美东时间(America/New_York，自动适配夏/冬令时)
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
-		lastCNEOD := ""
+		lastCNSlot := ""
 		lastHK := ""
-		lastUS := ""
+		lastUSSlot := ""
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				now := time.Now().In(shanghaiTZ)
-				today := now.Format("2006-01-02")
+				now := time.Now()
+				nowBJ := now.In(shanghaiTZ)
+				todayBJ := nowBJ.Format("2006-01-02")
 
-				// A股盘中 09:35-15:00 每 5 分钟更新实时量比预警
+				// 1. A股（北京时间，周一至周五）：盘中 09:35-11:30 & 13:00-15:00 每 5 分钟轻量量比观测（仅 1 次批量请求）
 				if _, intraday := ElapsedCNTradingMinutes(now); intraday {
 					_ = e.CN.SyncAll(ctx, true)
 				}
-				// A股盘后 19:30 & 21:30 精确份额+净值双源核验
-				if (now.Hour() == 19 && now.Minute() >= 30 || now.Hour() == 21 && now.Minute() >= 30) && lastCNEOD != fmtSlot(today, now.Hour()) {
-					lastCNEOD = fmtSlot(today, now.Hour())
-					_ = e.TriggerSync(ctx, "cn")
+				if isWeekday(nowBJ) {
+					// A股晨间 08:45 复核深交所/Tushare 隔夜终值 + 盘后 19:30 / 21:30 三源核验
+					isCNMorning := nowBJ.Hour() == 8 && nowBJ.Minute() >= 45
+					isCNEvening := (nowBJ.Hour() == 19 && nowBJ.Minute() >= 30) || (nowBJ.Hour() == 21 && nowBJ.Minute() >= 30)
+					if (isCNMorning || isCNEvening) && lastCNSlot != fmtSlot(todayBJ, nowBJ.Hour()) {
+						lastCNSlot = fmtSlot(todayBJ, nowBJ.Hour())
+						_ = e.TriggerSync(ctx, "cn")
+					}
+					// 2. 港股（北京时间，周一至周五）：盘后 20:30 同步南向+CCASS T+2 快照
+					if nowBJ.Hour() == 20 && nowBJ.Minute() >= 30 && lastHK != todayBJ {
+						lastHK = todayBJ
+						_ = e.TriggerSync(ctx, "hk")
+					}
 				}
-				// 港股盘后 20:30 南向+CCASS 快照
-				if now.Hour() == 20 && now.Minute() >= 30 && lastHK != today {
-					lastHK = today
-					_ = e.TriggerSync(ctx, "hk")
-				}
-				// 美股早晨 06:30 巡检 SEC 13F 新申报
-				if now.Hour() == 6 && now.Minute() >= 30 && lastUS != today {
-					lastUS = today
-					_ = e.TriggerSync(ctx, "us")
+
+				// 3. 美股 SEC 13F（美东时间 America/New_York，周一至周五，自动处理夏令时/冬令时）：
+				// SEC EDGAR 17:30 ET 截稿后于 18:15 ET 巡检 + 次日 08:30 ET 复核
+				nowET := now.In(newYorkTZ)
+				todayET := nowET.Format("2006-01-02")
+				if isWeekday(nowET) {
+					isUSPostClose := nowET.Hour() == 18 && nowET.Minute() >= 15
+					isUSPreOpen := nowET.Hour() == 8 && nowET.Minute() >= 30
+					if (isUSPostClose || isUSPreOpen) && lastUSSlot != fmtSlot(todayET, nowET.Hour()) {
+						lastUSSlot = fmtSlot(todayET, nowET.Hour())
+						_ = e.TriggerSync(ctx, "us")
+					}
 				}
 			}
 		}

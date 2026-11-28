@@ -26,6 +26,12 @@ const SYNC_NAMES: Record<string, string> = {
   hk_flow: '港股南向 + CCASS 四大阵营',
 };
 
+const SYNC_SCHEDULES: Record<string, string> = {
+  cn_etf: '北京时间：盘中5分钟量比 · 19:30/21:30/次晨08:45 份额定稿',
+  us_13f: '美东时间 (ET)：周一至周五 08:30 & 18:15 自动巡检（自动适配夏/冬令时）',
+  hk_flow: '北京时间：周一至周五 20:30 同步 T+2 交收快照',
+};
+
 export const WatchlistView: React.FC<Props> = ({ onSynced }) => {
   const [statuses, setStatuses] = useState<SyncStatus[]>([]);
   const [progressMap, setProgressMap] = useState<Record<string, SyncProgress>>({});
@@ -277,6 +283,7 @@ export const WatchlistView: React.FC<Props> = ({ onSynced }) => {
                       {st?.last_sync_at ? new Date(st.last_sync_at * 1000).toLocaleString('zh-CN') : '--'}
                     </div>
                     {st?.source_label && <div className="truncate" title={st.source_label}>数据源：{st.source_label}</div>}
+                    <div className="text-[10px] text-slate-400 leading-snug pt-0.5">{SYNC_SCHEDULES[mk]}</div>
                     {(prog?.error || st?.error_msg) && (
                       <div className="text-rose-500 break-all">告警：{prog?.error || st?.error_msg}</div>
                     )}

@@ -227,10 +227,13 @@ export const HKMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
     <div className="space-y-4">
       {/* T+2 日期提示栏 */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5 rounded-2xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200/60 dark:border-blue-900/50 text-xs">
-        <div className="flex items-center gap-2 text-blue-800 dark:text-blue-200">
+        <div className="flex items-center gap-2 flex-wrap text-blue-800 dark:text-blue-200">
           <Clock className="w-3.5 h-3.5 shrink-0" />
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/70 dark:text-blue-200 whitespace-nowrap">
+            T+2 交收日更
+          </span>
           <span>
-            港交所 CCASS 严格实行 <strong>T+2 交收制度</strong>：当前交收日{' '}
+            北京时间 20:30 更新 · 当前交收日{' '}
             <strong className="tabular-nums">{settlementDate || '--'}</strong>（对应真实交易日{' '}
             <strong className="tabular-nums">{tradeDate || '--'}</strong>）
           </span>

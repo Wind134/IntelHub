@@ -3,6 +3,7 @@ package capital
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 func TestCNTwoStageVolRatioAndSignal(t *testing.T) {
@@ -115,5 +116,13 @@ func TestTushareHelpers(t *testing.T) {
 	}
 	if !isLikelySplitOrCorrupt(20e8, 40e8, 4.00, 2.01) {
 		t.Fatalf("2-for-1 split (shares x2, nav /2) MUST be blocked")
+	}
+	// 验证 A 股午休静默 & 美东时区自动加载
+	lunch := time.Date(2026, 11, 27, 12, 0, 0, 0, shanghaiTZ)
+	if _, intra := ElapsedCNTradingMinutes(lunch); intra {
+		t.Fatalf("lunch break 12:00 BJ should not trigger intraday polling")
+	}
+	if newYorkTZ.String() != "America/New_York" {
+		t.Fatalf("expected America/New_York tz, got %s", newYorkTZ.String())
 	}
 }
