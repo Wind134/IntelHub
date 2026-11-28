@@ -41,6 +41,20 @@ function getWindowFlow(item: CNETFSummary, win: WindowKey): number {
   }
 }
 
+function isSZBaselineOnly(etf: CNETFSummary): boolean {
+  return (
+    etf.exchange === 'SZ' &&
+    Math.abs(etf.flow_1d_yi) < 0.0001 &&
+    Math.abs(etf.flow_5d_yi) < 0.0001 &&
+    Math.abs(etf.flow_20d_yi) < 0.0001
+  );
+}
+
+function fmtFlowCell(val: number, baselineOnly: boolean): string {
+  if (baselineOnly) return '首日留档';
+  return fmtRMBYi(val, true);
+}
+
 function SignalBadge({ signal, ratio }: { signal: string; ratio: number }) {
   if (signal === 'intraday_surge') {
     return (
@@ -277,13 +291,13 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <div className="p-3.5 sm:p-4 rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] shadow-xs">
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-            <span>国家队底仓重估</span>
+            <span>监控池机构持仓重估</span>
             <Landmark className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
           </div>
           <div className="mt-1.5 text-lg sm:text-xl font-bold tabular-nums tracking-tight">
             {fmtRMBYi(kpi.govTotal)}
           </div>
-          <div className="mt-1 text-[11px] text-slate-400">法定份额 × 最新 NAV</div>
+          <div className="mt-1 text-[11px] text-slate-400">官方中报/年报机构占比 × 最新规模</div>
         </div>
 
         <div className="p-3.5 sm:p-4 rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] shadow-xs">
@@ -380,7 +394,7 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
               <tr>
                 <th className="py-3 px-4 font-medium">ETF 名称 / 代码</th>
                 <th className="py-3 px-3 font-medium text-right">总规模</th>
-                <th className="py-3 px-3 font-medium text-right">国家队重估(占比)</th>
+                <th className="py-3 px-3 font-medium text-right">机构持仓(占比)</th>
                 <th className="py-3 px-3 font-medium text-right">当日净申赎</th>
                 <th className="py-3 px-3 font-medium text-right">5日净申赎</th>
                 <th className="py-3 px-3 font-medium text-right">20日净申赎</th>
@@ -402,7 +416,9 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
                   </td>
                 </tr>
               ) : (
-                filtered.map((etf) => (
+                filtered.map((etf) => {
+                  const szBase = isSZBaselineOnly(etf);
+                  return (
                   <tr
                     key={etf.code}
                     onClick={() => openDetail(etf)}
@@ -418,19 +434,23 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
                       {fmtRMBYi(etf.total_aum_yi)}
                     </td>
                     <td className="py-3 px-3 text-right tabular-nums">
-                      <div className="font-medium">{fmtRMBYi(etf.gov_mtm_value_yi)}</div>
+                      <div className="font-medium">
+                        {etf.gov_ratio_pct > 0 ? fmtRMBYi(etf.gov_mtm_value_yi) : '--'}
+                      </div>
                       <div className="text-[11px] text-slate-400">
-                        {etf.gov_ratio_pct > 0 ? `占 ${etf.gov_ratio_pct.toFixed(1)}%` : '定期报告跟踪'}
+                        {etf.gov_ratio_pct > 0
+                          ? `占 ${etf.gov_ratio_pct.toFixed(1)}% (${etf.gov_report_date.slice(0, 7)})`
+                          : '待中报披露'}
                       </div>
                     </td>
-                    <td className={`py-3 px-3 text-right tabular-nums font-medium ${flowColorClass(etf.flow_1d_yi)}`}>
-                      {fmtRMBYi(etf.flow_1d_yi, true)}
+                    <td className={`py-3 px-3 text-right tabular-nums font-medium ${szBase ? 'text-slate-400 text-xs font-normal' : flowColorClass(etf.flow_1d_yi)}`}>
+                      {fmtFlowCell(etf.flow_1d_yi, szBase)}
                     </td>
-                    <td className={`py-3 px-3 text-right tabular-nums font-medium ${flowColorClass(etf.flow_5d_yi)}`}>
-                      {fmtRMBYi(etf.flow_5d_yi, true)}
+                    <td className={`py-3 px-3 text-right tabular-nums font-medium ${szBase ? 'text-slate-400 text-xs font-normal' : flowColorClass(etf.flow_5d_yi)}`}>
+                      {szBase ? '--' : fmtRMBYi(etf.flow_5d_yi, true)}
                     </td>
-                    <td className={`py-3 px-3 text-right tabular-nums ${flowColorClass(etf.flow_20d_yi)}`}>
-                      {fmtRMBYi(etf.flow_20d_yi, true)}
+                    <td className={`py-3 px-3 text-right tabular-nums ${szBase ? 'text-slate-400 text-xs' : flowColorClass(etf.flow_20d_yi)}`}>
+                      {szBase ? '--' : fmtRMBYi(etf.flow_20d_yi, true)}
                     </td>
                     <td className="py-3 px-3 text-center">
                       <SignalBadge signal={etf.volume_signal} ratio={etf.vol_ratio_20} />
@@ -442,7 +462,8 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
                       </div>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -474,21 +495,21 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
 
               <div className="grid grid-cols-3 gap-2 mt-3 pt-2.5 border-t border-[var(--border-subtle)]">
                 <div>
-                  <div className="text-[11px] text-slate-400">国家队重估</div>
+                  <div className="text-[11px] text-slate-400">机构持仓(占比)</div>
                   <div className="text-xs font-semibold tabular-nums mt-0.5">
-                    {fmtRMBYi(etf.gov_mtm_value_yi)}
+                    {etf.gov_ratio_pct > 0 ? `${fmtRMBYi(etf.gov_mtm_value_yi)}` : '--'}
                   </div>
                 </div>
                 <div>
                   <div className="text-[11px] text-slate-400">当日净申赎</div>
-                  <div className={`text-xs font-semibold tabular-nums mt-0.5 ${flowColorClass(etf.flow_1d_yi)}`}>
-                    {fmtRMBYi(etf.flow_1d_yi, true)}
+                  <div className={`text-xs font-semibold tabular-nums mt-0.5 ${isSZBaselineOnly(etf) ? 'text-slate-400 font-normal' : flowColorClass(etf.flow_1d_yi)}`}>
+                    {fmtFlowCell(etf.flow_1d_yi, isSZBaselineOnly(etf))}
                   </div>
                 </div>
                 <div>
                   <div className="text-[11px] text-slate-400">{winLabel}净流向</div>
-                  <div className={`text-xs font-semibold tabular-nums mt-0.5 ${flowColorClass(getWindowFlow(etf, win))}`}>
-                    {fmtRMBYi(getWindowFlow(etf, win), true)}
+                  <div className={`text-xs font-semibold tabular-nums mt-0.5 ${isSZBaselineOnly(etf) ? 'text-slate-400 font-normal' : flowColorClass(getWindowFlow(etf, win))}`}>
+                    {isSZBaselineOnly(etf) ? '--' : fmtRMBYi(getWindowFlow(etf, win), true)}
                   </div>
                 </div>
               </div>

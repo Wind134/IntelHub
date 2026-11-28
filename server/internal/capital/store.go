@@ -179,6 +179,8 @@ CREATE TABLE IF NOT EXISTS cap_sync_runs (
 		_, _ = r.st.WriteDB().Exec(`DELETE FROM cap_us_13f_holdings WHERE cik = '0001364742'`)
 		// 修正此前将 UBS(B01161) 误归入 internet_retail 的历史快照行
 		_, _ = r.st.WriteDB().Exec(`UPDATE cap_hk_broker_top SET cohort = 'foreign_inst' WHERE participant_id = 'B01161'`)
+		// 清理旧版静态估算持仓种子，改为由采集器实时拉取证监会定期报告官方机构持仓结构
+		_, _ = r.st.WriteDB().Exec(`DELETE FROM cap_cn_etf_holders WHERE report_type LIKE '%法定披露%' OR report_type LIKE '%前十持有人披露%'`)
 	}
 	r.st.UnlockWrite()
 	if err != nil {
@@ -306,47 +308,6 @@ func (r *Repo) seedDefaults(ctx context.Context) error {
 		return err
 	}
 
-	// 初始化已公开披露的国家队核心宽基 ETF 法定持仓底仓（严格来源于证监会/巨潮官方季报 >=20% 单一持有人及中报前十持有人披露，可随新季报自动增量刷新）
-	return r.seedBaselineGovHolders(ctx)
-}
-
-func (r *Repo) seedBaselineGovHolders(ctx context.Context) error {
-	var count int
-	_ = r.st.ReadDB().QueryRowContext(ctx, `SELECT COUNT(*) FROM cap_cn_etf_holders`).Scan(&count)
-	if count > 0 {
-		return nil
-	}
-	now := time.Now().Unix()
-	const cninfoBase = "http://www.cninfo.com.cn/new/commonUrl/pageOfSearch?url=disclosure/list/search&lastPage=index"
-	holders := []CNETFHolder{
-		{Code: "510300", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金投资有限责任公司", SharesHeld: 35655490000, HoldRatioPct: 40.5, SourceURL: cninfoBase},
-		{Code: "510300", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金资产管理有限责任公司", SharesHeld: 30016250000, HoldRatioPct: 34.1, SourceURL: cninfoBase},
-		{Code: "510310", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金投资有限责任公司", SharesHeld: 54735000000, HoldRatioPct: 44.2, SourceURL: cninfoBase},
-		{Code: "510310", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金资产管理有限责任公司", SharesHeld: 42318000000, HoldRatioPct: 34.2, SourceURL: cninfoBase},
-		{Code: "510330", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金投资有限责任公司", SharesHeld: 20937000000, HoldRatioPct: 47.6, SourceURL: cninfoBase},
-		{Code: "510330", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金资产管理有限责任公司", SharesHeld: 13845000000, HoldRatioPct: 31.5, SourceURL: cninfoBase},
-		{Code: "159919", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金投资有限责任公司", SharesHeld: 19544000000, HoldRatioPct: 48.2, SourceURL: cninfoBase},
-		{Code: "159919", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金资产管理有限责任公司", SharesHeld: 11260000000, HoldRatioPct: 27.8, SourceURL: cninfoBase},
-		{Code: "510050", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金投资有限责任公司", SharesHeld: 28749000000, HoldRatioPct: 54.8, SourceURL: cninfoBase},
-		{Code: "510050", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金资产管理有限责任公司", SharesHeld: 11852000000, HoldRatioPct: 22.6, SourceURL: cninfoBase},
-		{Code: "510500", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金投资有限责任公司", SharesHeld: 11682000000, HoldRatioPct: 58.1, SourceURL: cninfoBase},
-		{Code: "512100", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金投资有限责任公司", SharesHeld: 11284000000, HoldRatioPct: 47.2, SourceURL: cninfoBase},
-		{Code: "159845", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金投资有限责任公司", SharesHeld: 7856000000, HoldRatioPct: 56.4, SourceURL: cninfoBase},
-		{Code: "560010", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金投资有限责任公司", SharesHeld: 5940000000, HoldRatioPct: 59.1, SourceURL: cninfoBase},
-		{Code: "159915", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金投资有限责任公司", SharesHeld: 7420000000, HoldRatioPct: 21.8, SourceURL: cninfoBase},
-		{Code: "588000", ReportDate: "2026-06-30", ReportType: "中报(前十持有人披露)", HolderName: "中央汇金投资有限责任公司", SharesHeld: 6815000000, HoldRatioPct: 8.9, SourceURL: cninfoBase},
-		{Code: "510180", ReportDate: "2026-09-30", ReportType: "三季报(≥20%法定披露)", HolderName: "中央汇金投资有限责任公司", SharesHeld: 4920000000, HoldRatioPct: 79.6, SourceURL: cninfoBase},
-	}
-
-	r.st.LockWrite()
-	defer r.st.UnlockWrite()
-	for _, h := range holders {
-		_, _ = r.st.WriteDB().ExecContext(ctx, `
-			INSERT OR IGNORE INTO cap_cn_etf_holders
-			(code, report_date, report_type, holder_name, shares_held, hold_ratio_pct, filing_value_yi, source_url, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, h.Code, h.ReportDate, h.ReportType, h.HolderName, h.SharesHeld, h.HoldRatioPct, h.FilingValueYi, h.SourceURL, now)
-	}
 	return nil
 }
 
@@ -638,7 +599,7 @@ func (r *Repo) ListCNETFSummaries(ctx context.Context) ([]CNETFSummary, error) {
 			}
 		}
 
-		// 汇总最新一期报告期内的全部国家队主体持仓（公式 1.2）
+		// 汇总最新一期定期报告的官方机构持仓结构，按最新总规模与官方占比动态重估（严格 <= 总规模，避免份额大幅缩水/折算导致穿仓）
 		if len(holders) > 0 {
 			latestRep := holders[0].ReportDate
 			sum.GovReportDate = latestRep
@@ -658,12 +619,17 @@ func (r *Repo) ListCNETFSummaries(ctx context.Context) ([]CNETFSummary, error) {
 				}
 				sum.GovHolders = append(sum.GovHolders, h)
 			}
-			if sum.TotalShares > 0 {
-				// 当总份额与报告期不同时，按国家队法定份额 × 最新 NAV 重估动态市值
-				sum.GovMTMValueYi = (sum.GovShares * px) / 1e8
-				if sum.GovRatioPct <= 0 {
-					sum.GovRatioPct = (sum.GovShares / sum.TotalShares) * 100
+			if sum.GovRatioPct > 100 {
+				sum.GovRatioPct = 100
+			}
+			if sum.TotalAUMYi > 0 && sum.GovRatioPct > 0 {
+				sum.GovMTMValueYi = sum.TotalAUMYi * (sum.GovRatioPct / 100.0)
+			} else if sum.TotalShares > 0 && sum.GovShares > 0 {
+				mtm := (sum.GovShares * px) / 1e8
+				if sum.TotalAUMYi > 0 && mtm > sum.TotalAUMYi {
+					mtm = sum.TotalAUMYi
 				}
+				sum.GovMTMValueYi = mtm
 			}
 		}
 		out = append(out, sum)

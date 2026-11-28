@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -264,6 +265,7 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 
 	if !intradayOnly {
 		c.backfillSSEHistoricalShares(ctx, watches, "2026-11-01")
+		c.syncInstitutionalHolders(ctx, watches)
 	}
 
 	c.repo.SetSyncStatus(ctx, SyncStatus{
@@ -634,4 +636,57 @@ func (c *CNCollector) backfillHistory(ctx context.Context, w WatchItem) error {
 		})
 	}
 	return c.repo.UpsertCNETFDailyBatch(ctx, batch)
+}
+
+var reCyrjgRow = regexp.MustCompile(`<tr><td>(\d{4}-\d{2}-\d{2})</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td></tr>`)
+
+// syncInstitutionalHolders 抓取每只 ETF 最新官方定期报告（中报/年报）的机构持仓结构，替代静态硬编码数据。
+func (c *CNCollector) syncInstitutionalHolders(ctx context.Context, watches []WatchItem) {
+	for _, w := range watches {
+		if ctx.Err() != nil {
+			return
+		}
+		u := fmt.Sprintf("https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=cyrjg&code=%s", w.Code)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		req.Header.Set("Referer", "https://fundf10.eastmoney.com/")
+		req.Header.Set("User-Agent", "Mozilla/5.0")
+		resp, err := c.http.Do(req)
+		if err != nil {
+			continue
+		}
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+		resp.Body.Close()
+
+		matches := reCyrjgRow.FindAllStringSubmatch(string(raw), 2)
+		if len(matches) == 0 {
+			continue
+		}
+		srcURL := fmt.Sprintf("https://fundf10.eastmoney.com/cyrjg_%s.html", w.Code)
+		for _, m := range matches {
+			repDate := strings.TrimSpace(m[1])
+			instPct, err1 := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(m[2]), "%"), 64)
+			totSharesYi, err2 := strconv.ParseFloat(strings.ReplaceAll(strings.TrimSpace(m[5]), ",", ""), 64)
+			if err1 != nil || instPct <= 0 {
+				continue
+			}
+			repType := "年报机构结构"
+			if strings.HasSuffix(repDate, "-06-30") {
+				repType = "中报机构结构"
+			}
+			sharesHeld := 0.0
+			if err2 == nil && totSharesYi > 0 {
+				sharesHeld = totSharesYi * 1e8 * (instPct / 100.0)
+			}
+			_ = c.repo.UpsertCNETFHolder(ctx, CNETFHolder{
+				Code:         w.Code,
+				ReportDate:   repDate,
+				ReportType:   repType,
+				HolderName:   "机构投资者合计（定期报告官方披露）",
+				SharesHeld:   sharesHeld,
+				HoldRatioPct: instPct,
+				SourceURL:    srcURL,
+			})
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
