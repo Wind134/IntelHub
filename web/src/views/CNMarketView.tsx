@@ -495,7 +495,7 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
                 {trendScope === 'core' ? '国家队核心宽基' : '全监控池 ETF'} · 申购资金累计趋势（人民币亿元）
               </h3>
               <p className="text-[11px] text-slate-400">
-                蓝线追踪 11 月以来累计净申赎走势（右轴），红绿柱为每日净申赎脉冲（左轴），收盘日更三源核验
+                蓝线追踪近 90 个交易日累计净申赎走势（右轴），红绿柱为每日净申赎脉冲（左轴），收盘日更三源核验
               </p>
             </div>
             <div className="inline-flex p-0.5 rounded-xl bg-slate-200/70 dark:bg-slate-800/90">

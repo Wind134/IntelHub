@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -647,7 +648,7 @@ func (r *Repo) GetCNFlowTrend(ctx context.Context, limit int) ([]CNFlowTrendPoin
 		FROM cap_cn_etf_daily d
 		JOIN cap_watchlist w ON w.market = 'cn_etf' AND w.code = d.code AND w.enabled = 1
 		WHERE d.is_intraday = 0
-		  AND d.trade_date >= '2026-11-01'
+		  AND (d.source_note LIKE '%官方%' OR d.source_note LIKE '%Tushare%')
 		ORDER BY d.trade_date ASC
 	`)
 	if err != nil {
@@ -679,6 +680,10 @@ func (r *Repo) GetCNFlowTrend(ctx context.Context, limit int) ([]CNFlowTrendPoin
 	}
 	if len(dates) > limit {
 		dates = dates[len(dates)-limit:]
+	}
+	// 跳过首日尚未形成差值的全 0 基线点，保证折线图从首个真实净申赎日起步
+	for len(dates) > 1 && math.Abs(byDate[dates[0]].DailyFlowYi) < 0.0001 {
+		dates = dates[1:]
 	}
 	out := make([]CNFlowTrendPoint, 0, len(dates))
 	cumAll := 0.0

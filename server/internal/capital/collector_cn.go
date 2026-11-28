@@ -238,13 +238,13 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 		if ctx.Err() != nil {
 			break
 		}
-		existing, _ := c.repo.GetCNETFSeries(ctx, w.Code, 65)
-		// 首次历史回填（近 60 个交易日 NAV + 成交额 + 份额基线）
-		if len(existing) < 10 && !intradayOnly {
+		existing, _ := c.repo.GetCNETFSeries(ctx, w.Code, 95)
+		// 首次或不足 85 个交易日时回填近 95 个交易日 NAV + 成交额基线
+		if len(existing) < 85 && !intradayOnly {
 			if err := c.backfillHistory(ctx, w); err != nil {
 				log.Printf("[capital:cn] backfill %s warn: %v", w.Code, err)
 			}
-			existing, _ = c.repo.GetCNETFSeries(ctx, w.Code, 65)
+			existing, _ = c.repo.GetCNETFSeries(ctx, w.Code, 95)
 		}
 
 		em, hasEM := emMap[w.Code]
@@ -368,11 +368,12 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 	}
 
 	if !intradayOnly {
-		c.report(42, 100, "检查上交所历史每日份额...")
+		c.report(42, 100, "检查上交所近月官方份额...")
 		c.backfillSSEHistoricalShares(ctx, watches, "2026-11-01")
 		if c.ts.Enabled() {
-			c.report(55, 100, "Tushare Pro fund_share 回填深市与三源校验...")
-			c.backfillTushareHistoricalShares(ctx, watches, "2026-11-01")
+			since90 := time.Now().In(shanghaiTZ).AddDate(0, 0, -145).Format("2006-01-02")
+			c.report(55, 100, "Tushare Pro fund_share 回填近90交易日沪深官方份额...")
+			c.backfillTushareHistoricalShares(ctx, watches, since90)
 		}
 		c.report(85, 100, "更新最新定期报告机构持仓占比...")
 		c.syncInstitutionalHolders(ctx, watches)
@@ -572,7 +573,7 @@ func (c *CNCollector) backfillSSEHistoricalShares(ctx context.Context, watches [
 	}
 
 	for _, w := range shWatches {
-		series, err := c.repo.GetCNETFSeries(ctx, w.Code, 65)
+		series, err := c.repo.GetCNETFSeries(ctx, w.Code, 95)
 		if err != nil || len(series) < 2 {
 			continue
 		}
@@ -657,11 +658,17 @@ func (c *CNCollector) fetchLatestNAV(ctx context.Context, code string) (float64,
 	return nav, payload.Data.List[0].FSRQ
 }
 
-// backfillHistory 回填近 60 个交易日的净值、成交额及历史规模序列。
+// backfillHistory 回填近 95 个交易日的净值、成交额基线（已存在官方份额的日期不会被覆盖）。
 func (c *CNCollector) backfillHistory(ctx context.Context, w WatchItem) error {
-	// 1. 拉取近 60 日官方净值
+	existing, _ := c.repo.GetCNETFSeries(ctx, w.Code, 110)
+	hasDate := make(map[string]bool, len(existing))
+	for _, d := range existing {
+		hasDate[d.TradeDate] = true
+	}
+
+	// 1. 拉取近 95 日官方净值
 	navMap := map[string]float64{}
-	uNav := fmt.Sprintf("https://api.fund.eastmoney.com/f10/lsjz?fundCode=%s&pageIndex=1&pageSize=65", w.Code)
+	uNav := fmt.Sprintf("https://api.fund.eastmoney.com/f10/lsjz?fundCode=%s&pageIndex=1&pageSize=95", w.Code)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, uNav, nil)
 	req.Header.Set("Referer", "https://fundf10.eastmoney.com/")
 	req.Header.Set("User-Agent", "Mozilla/5.0")
@@ -689,7 +696,7 @@ func (c *CNCollector) backfillHistory(ctx context.Context, w WatchItem) error {
 	if w.Exchange == "SH" || strings.HasPrefix(w.Code, "5") {
 		prefix = "1"
 	}
-	uKline := fmt.Sprintf("https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=%s.%s&fields1=f1,f2,f3&fields2=f51,f53,f57&klt=101&fqt=0&end=20500101&lmt=65", prefix, w.Code)
+	uKline := fmt.Sprintf("https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=%s.%s&fields1=f1,f2,f3&fields2=f51,f53,f57&klt=101&fqt=0&end=20500101&lmt=95", prefix, w.Code)
 	kReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, uKline, nil)
 	kReq.Header.Set("User-Agent", "Mozilla/5.0")
 	type kRow struct {
@@ -731,6 +738,9 @@ func (c *CNCollector) backfillHistory(ctx context.Context, w WatchItem) error {
 
 	var batch []CNETFDaily
 	for i, k := range klines {
+		if hasDate[k.Date] {
+			continue
+		}
 		nav := navMap[k.Date]
 		if nav <= 0 {
 			nav = k.Close
@@ -778,7 +788,7 @@ func (c *CNCollector) backfillTushareHistoricalShares(ctx context.Context, watch
 			return
 		}
 		c.report(55+(idx*30)/maxInt(1, len(watches)), 100, fmt.Sprintf("Tushare fund_share %s (%d/%d)", toTSCode(w.Code, w.Exchange), idx+1, len(watches)))
-		series, err := c.repo.GetCNETFSeries(ctx, w.Code, 65)
+		series, err := c.repo.GetCNETFSeries(ctx, w.Code, 95)
 		if err != nil || len(series) < 2 {
 			continue
 		}
@@ -840,14 +850,9 @@ func (c *CNCollector) backfillTushareHistoricalShares(ctx context.Context, watch
 					series[i].NAV = nv
 				}
 			}
-			if isSZ {
-				series[i].TotalShares = tsSh
-				series[i].PrimaryShares = tsSh
-				series[i].VerifyStatus = "VERIFIED"
-				series[i].SourceNote = "Tushare Pro fund_share 官方历史份额"
-				touched = true
-			} else if series[i].TotalShares > 0 {
-				// 沪市已有上交所官方份额时，Tushare 作为第三独立源执行三源核验
+			hasSSEOfficial := !isSZ && strings.Contains(series[i].SourceNote, "上交所官方") && series[i].TotalShares > 0
+			if hasSSEOfficial {
+				// 已有上交所官方份额时，Tushare 作为第三独立源执行三源核验
 				diff := math.Abs(series[i].TotalShares-tsSh) / series[i].TotalShares
 				series[i].BackupShares = tsSh
 				if diff <= 0.005 {
@@ -856,10 +861,11 @@ func (c *CNCollector) backfillTushareHistoricalShares(ctx context.Context, watch
 					touched = true
 				}
 			} else {
+				// 深市全部交易日及沪市更早历史交易日均用 Tushare Pro 官方清算份额补齐
 				series[i].TotalShares = tsSh
 				series[i].PrimaryShares = tsSh
 				series[i].VerifyStatus = "VERIFIED"
-				series[i].SourceNote = "Tushare Pro fund_share 补齐"
+				series[i].SourceNote = "Tushare Pro fund_share 官方历史份额"
 				touched = true
 			}
 		}
@@ -868,14 +874,11 @@ func (c *CNCollector) backfillTushareHistoricalShares(ctx context.Context, watch
 		}
 
 		var updates []CNETFDaily
-		for i := 1; i < len(series); i++ {
-			if series[i].TradeDate < sinceDate {
-				if isSZ && series[i].TradeDate >= startPull {
-					updates = append(updates, series[i])
-				}
+		for i := 0; i < len(series); i++ {
+			if series[i].TradeDate < startPull {
 				continue
 			}
-			if isSZ {
+			if i > 0 {
 				prevSh := series[i-1].TotalShares
 				curSh := series[i].TotalShares
 				if prevSh > 0 && curSh > 0 {
