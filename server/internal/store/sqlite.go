@@ -275,7 +275,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
 	}
 	// Safe additive column migration for existing databases
 	_, _ = s.writeDB.Exec(`ALTER TABLE intel_events ADD COLUMN feishu_message_id TEXT NOT NULL DEFAULT ''`)
-	return nil
+	return s.migrateAuth()
 }
 
 func simhashBands(h uint64) (int64, int64, int64, int64) {

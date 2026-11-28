@@ -74,7 +74,8 @@ jobs:
           flutter build windows --release `
             --build-name="${{ needs.meta.outputs.version }}" `
             --dart-define="APP_VERSION=${{ needs.meta.outputs.version }}" `
-            --dart-define="GITHUB_REPO=${{ github.repository }}"
+            --dart-define="GITHUB_REPO=${{ github.repository }}" `
+            --dart-define="DEFAULT_SERVER_URL=${{ secrets.DEFAULT_SERVER_URL }}"
       - name: Package Windows Installer (.exe) & Portable ZIP
         shell: pwsh
         run: |
@@ -121,7 +122,8 @@ jobs:
           flutter build apk --release --target-platform android-arm64 \
             --build-name="${{ needs.meta.outputs.version }}" \
             --dart-define="APP_VERSION=${{ needs.meta.outputs.version }}" \
-            --dart-define="GITHUB_REPO=${{ github.repository }}"
+            --dart-define="GITHUB_REPO=${{ github.repository }}" \
+            --dart-define="DEFAULT_SERVER_URL=${{ secrets.DEFAULT_SERVER_URL }}"
           mkdir -p ../artifacts
           cp build/app/outputs/flutter-apk/app-release.apk \
             "../artifacts/informationHub-${{ needs.meta.outputs.tag }}-android-arm64.apk"

@@ -27,6 +27,131 @@ class IntelApiClient {
     return resp.statusCode == 200;
   }
 
+  Future<Map<String, dynamic>> fetchAuthStatus(String serverUrl) async {
+    final clean = serverUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    final resp = await _http
+        .get(Uri.parse('$clean/api/v1/auth/status'))
+        .timeout(const Duration(seconds: 8));
+    if (resp.statusCode != 200) {
+      throw HttpException('连接服务器失败（HTTP ${resp.statusCode}）');
+    }
+    return jsonDecode(resp.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> registerAccount({
+    required String serverUrl,
+    required String username,
+    required String password,
+    required String setupKey,
+    required String deviceName,
+    required String platform,
+  }) async {
+    final clean = serverUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    final resp = await _http
+        .post(
+          Uri.parse('$clean/api/v1/auth/register'),
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'username': username.trim(),
+            'display_name': username.trim(),
+            'password': password,
+            'setup_key': setupKey.trim(),
+            'device_name': deviceName,
+            'platform': platform,
+          }),
+        )
+        .timeout(const Duration(seconds: 15));
+    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    if (resp.statusCode != 200) {
+      throw HttpException(data['error']?.toString() ?? 'HTTP ${resp.statusCode}');
+    }
+    return data;
+  }
+
+  Future<Map<String, dynamic>> loginAccount({
+    required String serverUrl,
+    required String username,
+    required String password,
+    required String deviceName,
+    required String platform,
+  }) async {
+    final clean = serverUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    final resp = await _http
+        .post(
+          Uri.parse('$clean/api/v1/auth/login'),
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'username': username.trim(),
+            'password': password,
+            'device_name': deviceName,
+            'platform': platform,
+          }),
+        )
+        .timeout(const Duration(seconds: 15));
+    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    if (resp.statusCode != 200) {
+      throw HttpException(data['error']?.toString() ?? 'HTTP ${resp.statusCode}');
+    }
+    return data;
+  }
+
+  Future<void> logoutAccount() async {
+    if (_cleanBase.isEmpty) return;
+    try {
+      await _http
+          .post(Uri.parse('$_cleanBase/api/v1/auth/logout'), headers: _headers)
+          .timeout(const Duration(seconds: 8));
+    } catch (_) {}
+  }
+
+  Future<Map<String, dynamic>> fetchAuthMe() async {
+    final resp = await _http
+        .get(Uri.parse('$_cleanBase/api/v1/auth/me'), headers: _headers)
+        .timeout(const Duration(seconds: 10));
+    if (resp.statusCode == 401) {
+      throw const HttpException('401');
+    }
+    if (resp.statusCode != 200) {
+      throw HttpException('HTTP ${resp.statusCode}');
+    }
+    return jsonDecode(resp.body) as Map<String, dynamic>;
+  }
+
+  Future<void> updateEncryptedPreferences(Map<String, dynamic> prefs) async {
+    if (_cleanBase.isEmpty) return;
+    final resp = await _http
+        .put(
+          Uri.parse('$_cleanBase/api/v1/auth/preferences'),
+          headers: _headers,
+          body: jsonEncode(prefs),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (resp.statusCode != 200) {
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      throw HttpException(data['error']?.toString() ?? 'HTTP ${resp.statusCode}');
+    }
+  }
+
+  Future<void> changePassword({
+    required String oldPassword,
+    required String newPassword,
+  }) async {
+    final resp = await _http
+        .post(
+          Uri.parse('$_cleanBase/api/v1/auth/change-password'),
+          headers: _headers,
+          body: jsonEncode({
+            'old_password': oldPassword,
+            'new_password': newPassword,
+          }),
+        )
+        .timeout(const Duration(seconds: 12));
+    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    if (resp.statusCode != 200) {
+      throw HttpException(data['error']?.toString() ?? 'HTTP ${resp.statusCode}');
+    }
+  }
+
   Future<List<IntelEvent>> fetchEvents({
     String? query,
     List<String>? categories,
