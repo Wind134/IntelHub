@@ -232,25 +232,31 @@ func (c *HKCollector) SyncAll(ctx context.Context) error {
 	}
 	count := c.persistSouthboundSnapshot(ctx, settleDate, items, sbURL)
 
-	// 2. 同步核心关注港股的 CCASS 四大阵营（含富途 B01955 / 盈透 B01590）
+	// 2. 同步核心关注港股的 CCASS 四大阵营（含富途 B01955 / 盈透 B01590），复用表单状态并跳过已同步标的
 	watches, _ := c.repo.ListWatchlist(ctx, "hk_stock")
 	quotes := c.fetchHKQuotes(ctx, watchCodes(watches))
-	// 首次同步最多取前 15 只核心龙头保证响应敏捷，日常巡检全量覆盖
-	ccassLimit := len(watches)
-	if ccassLimit > 18 {
-		ccassLimit = 18
-	}
-	for i := 0; i < ccassLimit; i++ {
-		if ctx.Err() != nil {
-			break
+	const ccURL = "https://www3.hkexnews.hk/sdw/search/searchsdw_c.aspx"
+	initHTML, initErr := c.getHTML(ctx, ccURL)
+	if initErr != nil {
+		log.Printf("[capital:hk] ccass init warn: %v", initErr)
+	} else {
+		baseFields := extractAspNetHiddenFields(initHTML)
+		for i := range watches {
+			if ctx.Err() != nil {
+				break
+			}
+			code := padHKCode(watches[i].Code)
+			if _, snaps, _, err := c.repo.GetHKStockDetail(ctx, code); err == nil && len(snaps) > 0 && snaps[0].SettlementDate == settleDate {
+				continue
+			}
+			if err := c.syncOneCCASS(ctx, watches[i], settleDate, quotes[code], baseFields); err != nil {
+				log.Printf("[capital:hk] ccass %s warn: %v", watches[i].Code, err)
+			}
+			time.Sleep(250 * time.Millisecond)
 		}
-		if err := c.syncOneCCASS(ctx, watches[i], settleDate, quotes[padHKCode(watches[i].Code)]); err != nil {
-			log.Printf("[capital:hk] ccass %s warn: %v", watches[i].Code, err)
-		}
-		time.Sleep(350 * time.Millisecond)
 	}
 
-	c.repo.SetSyncStatus(ctx, SyncStatus{
+	c.repo.SetSyncStatus(context.Background(), SyncStatus{
 		Market:      "hk_flow",
 		Status:      "ok",
 		DataAsOf:    settleDate,
@@ -303,13 +309,12 @@ func (c *HKCollector) persistSouthboundSnapshot(ctx context.Context, settleDate 
 	return len(batch)
 }
 
-func (c *HKCollector) syncOneCCASS(ctx context.Context, w WatchItem, settleDate string, q hkQuote) error {
+func (c *HKCollector) syncOneCCASS(ctx context.Context, w WatchItem, settleDate string, q hkQuote, baseFields url.Values) error {
 	const ccURL = "https://www3.hkexnews.hk/sdw/search/searchsdw_c.aspx"
-	initHTML, err := c.getHTML(ctx, ccURL)
-	if err != nil {
-		return err
+	form := url.Values{}
+	for k, vals := range baseFields {
+		form[k] = append([]string(nil), vals...)
 	}
-	form := extractAspNetHiddenFields(initHTML)
 	dateSlash := strings.ReplaceAll(settleDate, "-", "/")
 	form.Set("txtShareholdingDate", dateSlash)
 	form.Set("txtStockCode", padHKCode(w.Code))

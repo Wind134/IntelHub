@@ -95,7 +95,7 @@ func (e *Engine) TriggerSync(ctx context.Context, market string) error {
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
 
-	sctx, cancel := context.WithTimeout(ctx, 4*time.Minute)
+	sctx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 	defer cancel()
 
 	switch market {

@@ -652,6 +652,7 @@ func (c *CNCollector) syncInstitutionalHolders(ctx context.Context, watches []Wa
 		req.Header.Set("User-Agent", "Mozilla/5.0")
 		resp, err := c.http.Do(req)
 		if err != nil {
+			c.syncInstitutionalHolderSinaFallback(ctx, w.Code)
 			continue
 		}
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
@@ -659,6 +660,7 @@ func (c *CNCollector) syncInstitutionalHolders(ctx context.Context, watches []Wa
 
 		matches := reCyrjgRow.FindAllStringSubmatch(string(raw), 2)
 		if len(matches) == 0 {
+			c.syncInstitutionalHolderSinaFallback(ctx, w.Code)
 			continue
 		}
 		srcURL := fmt.Sprintf("https://fundf10.eastmoney.com/cyrjg_%s.html", w.Code)
@@ -689,4 +691,48 @@ func (c *CNCollector) syncInstitutionalHolders(ctx context.Context, watches []Wa
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+func (c *CNCollector) syncInstitutionalHolderSinaFallback(ctx context.Context, code string) {
+	u := fmt.Sprintf("https://stock.finance.sina.com.cn/fundInfo/api/openapi.php/FundPageInfoService.tabcyrjg?symbol=%s", code)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req.Header.Set("Referer", "https://finance.sina.com.cn/")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	var p struct {
+		Result struct {
+			Data struct {
+				CYRInfo struct {
+					BDRQ   string `json:"bdrq"`
+					JGCYBL string `json:"jgcybl"`
+					JGCYFE string `json:"jgcyfe"`
+				} `json:"CYRInfo"`
+			} `json:"data"`
+		} `json:"result"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&p) != nil {
+		return
+	}
+	pct, err := strconv.ParseFloat(strings.TrimSpace(p.Result.Data.CYRInfo.JGCYBL), 64)
+	if err != nil || pct <= 0 {
+		return
+	}
+	sh, _ := strconv.ParseFloat(strings.TrimSpace(p.Result.Data.CYRInfo.JGCYFE), 64)
+	repDate := "2026-06-30"
+	if yr := strings.Split(p.Result.Data.CYRInfo.BDRQ, ".")[0]; len(yr) == 4 {
+		repDate = yr + "-06-30"
+	}
+	_ = c.repo.UpsertCNETFHolder(ctx, CNETFHolder{
+		Code:         code,
+		ReportDate:   repDate,
+		ReportType:   "中报机构结构",
+		HolderName:   "机构投资者合计（定期报告官方披露）",
+		SharesHeld:   sh,
+		HoldRatioPct: pct,
+		SourceURL:    fmt.Sprintf("https://finance.sina.com.cn/fund/quotes/%s/bc.shtml", code),
+	})
 }
