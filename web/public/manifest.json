@@ -1,0 +1,15 @@
+{
+  "name": "informationHub · 机构资金流向看板",
+  "short_name": "CapitalFlow",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F3F6FB",
+  "theme_color": "#0A7BFF",
+  "icons": [
+    {
+      "src": "/icon-256.png",
+      "sizes": "256x256",
+      "type": "image/png"
+    }
+  ]
+}

@@ -92,6 +92,11 @@ func (s *Store) Close() error {
 	return errors.Join(errs...)
 }
 
+func (s *Store) ReadDB() *sql.DB  { return s.readDB }
+func (s *Store) WriteDB() *sql.DB { return s.writeDB }
+func (s *Store) LockWrite()       { s.writeMu.Lock() }
+func (s *Store) UnlockWrite()     { s.writeMu.Unlock() }
+
 func (s *Store) applyPragmas(db *sql.DB) error {
 	pragmas := []string{
 		"PRAGMA journal_mode = WAL;",
