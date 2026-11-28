@@ -34,7 +34,7 @@ void main() async {
       size: Size(1320, 840),
       minimumSize: Size(920, 620),
       center: true,
-      title: 'IntelHub · 全天候突发情报终端',
+      title: 'informationHub',
       titleBarStyle: TitleBarStyle.hidden,
       backgroundColor: Colors.transparent,
     );
@@ -102,7 +102,7 @@ class _IntelHubAppState extends State<IntelHubApp> {
     return FluidMotionScope(
       enabled: _highFpsMotion,
       child: MaterialApp(
-        title: 'IntelHub 突发情报台',
+        title: 'informationHub',
         debugShowCheckedModeBanner: false,
         themeMode: _themeMode,
         theme: AppTheme.light(),
@@ -203,6 +203,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
   final ValueNotifier<int> _detailTick = ValueNotifier<int>(0);
   final ValueNotifier<String> _streamNotifier = ValueNotifier<String>('');
   final ValueNotifier<bool> _askingNotifier = ValueNotifier<bool>(false);
+  final ValueNotifier<String> _askStatusNotifier = ValueNotifier<String>('');
   final TextEditingController _askCtrl = TextEditingController();
   final ScrollController _detailScrollCtrl = ScrollController();
   final ScrollController _liveScrollCtrl = ScrollController();
@@ -283,6 +284,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     _detailTick.dispose();
     _streamNotifier.dispose();
     _askingNotifier.dispose();
+    _askStatusNotifier.dispose();
     _searchCtrl.dispose();
     _askCtrl.dispose();
     _urlCtrl.dispose();
@@ -852,6 +854,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     _askCtrl.clear();
 
     _askingNotifier.value = true;
+    _askStatusNotifier.value = _webSearchInAsk ? '正在建立连接并联网检索…' : '正在连接模型深度研判…';
     _streamNotifier.value = '';
     _selectedThreads = [
       ..._selectedThreads,
@@ -873,6 +876,9 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
       await for (final delta in _api.streamAsk(
         endpointPath: '/api/v1/events/${ev.eventCode}/ask',
         payload: {'question': question.trim(), 'web_search': _webSearchInAsk},
+        onStatus: (st) {
+          if (mounted) _askStatusNotifier.value = st;
+        },
       )) {
         if (!mounted) break;
         buf.write(delta);
@@ -1434,7 +1440,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                   children: [
                     Image.asset('assets/app_icon_squircle.png', width: 24, height: 24, filterQuality: FilterQuality.high),
                     const SizedBox(width: 10),
-                    Text('IntelHub', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5, color: cs.onSurface)),
+                    Text('informationHub', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5, color: cs.onSurface)),
                     const SizedBox(width: 8),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
@@ -2018,11 +2024,16 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                             SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: cs.primary)),
                             const SizedBox(width: 12),
                             Expanded(
-                              child: Text(
-                                _webSearchInAsk
-                                    ? '正在联网检索最新信源并调用 $_strongModel 深度研判…'
-                                    : '正在调用 $_strongModel 深度思考中…',
-                                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: cs.primary),
+                              child: ValueListenableBuilder<String>(
+                                valueListenable: _askStatusNotifier,
+                                builder: (_, st, __) => Text(
+                                  st.isNotEmpty
+                                      ? '$st（$_strongModel）'
+                                      : (_webSearchInAsk
+                                          ? '正在联网检索最新信源并调用 $_strongModel 深度研判…'
+                                          : '正在调用 $_strongModel 深度思考中…'),
+                                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: cs.primary),
+                                ),
                               ),
                             ),
                           ],

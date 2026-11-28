@@ -38,13 +38,13 @@ class WindowsTrayController with TrayListener {
         }
       }
       await trayManager.setIcon(iconPath);
-      await trayManager.setToolTip('IntelHub · 全天候突发情报监测中');
+      await trayManager.setToolTip('informationHub · 实时运行中');
       await trayManager.setContextMenu(Menu(items: [
-        MenuItem(key: 'show', label: '打开 IntelHub 主界面'),
+        MenuItem(key: 'show', label: '打开 informationHub'),
         MenuItem.separator(),
         MenuItem(key: 'test_notify', label: '发送测试原生通知'),
         MenuItem.separator(),
-        MenuItem(key: 'quit', label: '彻底退出 IntelHub'),
+        MenuItem(key: 'quit', label: '彻底退出 informationHub'),
       ]));
       _initialized = true;
     } catch (e) {

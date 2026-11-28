@@ -255,15 +255,15 @@ func (c *Client) ScoreEvent(ctx context.Context, item model.RawItem, extraContex
 	return heuristicScore(item), 0, fmt.Errorf("llm scoring fallback used: %w", lastErr)
 }
 
-// StreamAsk streams a deep analysis answer (SSE token deltas) for either single-event deep dive or historical RAG.
+// StreamAsk streams a deep analysis answer (SSE token deltas) with automatic transient retry
+// and graceful model fallback (strong -> fallback -> fast) if upstream fails before first token.
 func (c *Client) StreamAsk(ctx context.Context, systemPrompt, userPrompt string, history []model.EventThread, onDelta func(delta string) error) (fullText string, modelUsed string, err error) {
 	c.mu.RLock()
 	apiKey := c.cfg.APIKey
 	baseURL := c.cfg.BaseURL
-	modelUsed = c.cfg.StrongModel
-	if modelUsed == "" {
-		modelUsed = c.cfg.FastModel
-	}
+	strongModel := strings.TrimSpace(c.cfg.StrongModel)
+	fallbackModel := strings.TrimSpace(c.cfg.FallbackModel)
+	fastModel := strings.TrimSpace(c.cfg.FastModel)
 	c.mu.RUnlock()
 
 	if strings.TrimSpace(apiKey) == "" {
@@ -272,14 +272,80 @@ func (c *Client) StreamAsk(ctx context.Context, systemPrompt, userPrompt string,
 		return msg, "none", nil
 	}
 
+	// Build deduplicated model fallback chain: strong -> fallback -> fast
+	seen := map[string]bool{}
+	var candidates []string
+	for _, m := range []string{strongModel, fallbackModel, fastModel} {
+		if m != "" && !seen[m] {
+			seen[m] = true
+			candidates = append(candidates, m)
+		}
+	}
+	if len(candidates) == 0 {
+		return "", "", fmt.Errorf("no LLM model configured")
+	}
+
 	msgs := []chatMsg{{Role: "system", Content: systemPrompt}}
 	for _, h := range history {
 		msgs = append(msgs, chatMsg{Role: h.Role, Content: h.ContentMD})
 	}
 	msgs = append(msgs, chatMsg{Role: "user", Content: userPrompt})
 
+	// Dedicated streaming client: 45s cap waiting for response headers, unlimited total stream duration once flowing.
+	streamClient := &http.Client{
+		Timeout: 0,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			TLSHandshakeTimeout:   15 * time.Second,
+			ResponseHeaderTimeout: 45 * time.Second,
+			ExpectContinueTimeout: 2 * time.Second,
+			ForceAttemptHTTP2:     true,
+		},
+	}
+
+	var lastErr error
+	for idx, mdl := range candidates {
+		// Retry primary model once on transient failure before falling back
+		maxAttempts := 1
+		if idx == 0 {
+			maxAttempts = 2
+		}
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			if ctx.Err() != nil {
+				return "", mdl, ctx.Err()
+			}
+			emitted := false
+			text, streamErr := c.streamOnce(ctx, streamClient, baseURL, apiKey, mdl, msgs, func(d string) error {
+				emitted = true
+				return onDelta(d)
+			})
+			if streamErr == nil && strings.TrimSpace(text) != "" {
+				return text, mdl, nil
+			}
+			if emitted {
+				// Partial output already reached client; do not restart or duplicate answer.
+				return text, mdl, streamErr
+			}
+			if streamErr != nil {
+				lastErr = streamErr
+			} else {
+				lastErr = fmt.Errorf("model %s returned empty stream", mdl)
+			}
+			if attempt < maxAttempts {
+				select {
+				case <-ctx.Done():
+					return "", mdl, ctx.Err()
+				case <-time.After(1200 * time.Millisecond):
+				}
+			}
+		}
+	}
+	return "", candidates[0], lastErr
+}
+
+func (c *Client) streamOnce(ctx context.Context, streamClient *http.Client, baseURL, apiKey, modelName string, msgs []chatMsg, onDelta func(delta string) error) (string, error) {
 	body, _ := json.Marshal(chatReq{
-		Model:       modelUsed,
+		Model:       modelName,
 		Messages:    msgs,
 		Temperature: 0.3,
 		Stream:      true,
@@ -288,56 +354,67 @@ func (c *Client) StreamAsk(ctx context.Context, systemPrompt, userPrompt string,
 	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", modelUsed, err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	if strings.Contains(strings.ToLower(baseURL), "opencode.ai") {
-		req.Header.Set("x-opencode-session", fmt.Sprintf("intel-hub-ask-%d", time.Now().Unix()))
+		req.Header.Set("x-opencode-session", fmt.Sprintf("infohub-ask-%d", time.Now().UnixNano()))
 	}
 
-	streamClient := &http.Client{Timeout: 120 * time.Second}
 	resp, err := streamClient.Do(req)
 	if err != nil {
-		return "", modelUsed, err
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return "", modelUsed, fmt.Errorf("llm stream status %d: %s", resp.StatusCode, string(errBody))
+		return "", fmt.Errorf("llm stream status %d (%s): %s", resp.StatusCode, modelName, strings.TrimSpace(string(errBody)))
 	}
 
 	var full strings.Builder
 	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 64*1024), 512*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "[DONE]" {
-			break
+		if payload == "" || payload == "[DONE]" {
+			if payload == "[DONE]" {
+				break
+			}
+			continue
 		}
 		var chunk struct {
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
 			Choices []struct {
 				Delta struct {
 					Content string `json:"content"`
 				} `json:"delta"`
 			} `json:"choices"`
 		}
-		if err := json.Unmarshal([]byte(payload), &chunk); err == nil && len(chunk.Choices) > 0 {
-			delta := chunk.Choices[0].Delta.Content
-			if delta != "" {
-				full.WriteString(delta)
-				if err := onDelta(delta); err != nil {
-					return full.String(), modelUsed, err
+		if err := json.Unmarshal([]byte(payload), &chunk); err == nil {
+			if chunk.Error != nil && chunk.Error.Message != "" {
+				return full.String(), fmt.Errorf("upstream error (%s): %s", modelName, chunk.Error.Message)
+			}
+			if len(chunk.Choices) > 0 {
+				delta := chunk.Choices[0].Delta.Content
+				if delta != "" {
+					full.WriteString(delta)
+					if err := onDelta(delta); err != nil {
+						return full.String(), err
+					}
 				}
 			}
 		}
 	}
-	return full.String(), modelUsed, sc.Err()
+	return full.String(), sc.Err()
 }
 
 // GenerateDailyDigest synthesizes a structured Chinese Markdown executive briefing from pending P2 + P1 items.

@@ -4,22 +4,13 @@
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
-    <path
-        android:fillColor="#00000000"
-        android:pathData="M12,3.5 A8.5,8.5 0 1,0 20.5,12"
-        android:strokeWidth="2.2"
-        android:strokeColor="#FFFFFF"
-        android:strokeLineCap="round" />
-    <path
-        android:fillColor="#00000000"
-        android:pathData="M12,7 A5,5 0 1,0 17,12"
-        android:strokeWidth="2.0"
-        android:strokeColor="#FFFFFF"
-        android:strokeLineCap="round" />
+    <!-- Layered information cards matching Option B icon (no WiFi arcs) -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M12,10 A2,2 0 1,0 12,14 A2,2 0 1,0 12,10 Z" />
+        android:pathData="M5.5,4.5 h11 a2,2 0 0,1 2,2 v7.5 a2,2 0 0,1 -2,2 h-11 a2,2 0 0,1 -2,-2 v-7.5 a2,2 0 0,1 2,-2 z M6.5,7.2 a1.1,1.1 0 1,0 2.2,0 a1.1,1.1 0 1,0 -2.2,0 z M6.5,12.2 h9 a0.9,0.9 0 0,1 0,1.8 h-9 a0.9,0.9 0 0,1 0,-1.8 z"
+        android:fillType="evenOdd" />
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M18.2,4.2 A1.8,1.8 0 1,0 18.2,7.8 A1.8,1.8 0 1,0 18.2,4.2 Z" />
+        android:fillAlpha="0.7"
+        android:pathData="M7.5,17.8 h10.5 a1.5,1.5 0 0,0 1.5,-1.5 v-7.8 h1.2 a1.3,1.3 0 0,1 1.3,1.3 v8.2 a1.8,1.8 0 0,1 -1.8,1.8 h-11.4 a1.3,1.3 0 0,1 -1.3,-1.3 v-0.7 z" />
 </vector>

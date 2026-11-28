@@ -1,4 +1,4 @@
-# IntelHub — 全天候多领域突发情报与历史归档平台
+# informationHub — 全天候多领域突发情报与历史归档平台
 
 基于 **Golang + Pure-Go SQLite (WAL + CJK-FTS5) + Cloudflare Tunnel + Flutter (Windows 11 & Android/ColorOS 17 原生通知客户端) + Hermes 深度协同** 构建的私人实时突发情报与全周期历史复盘平台。
 
@@ -24,9 +24,9 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 流水线会自动发布 GitHub Release 并附带：
-- `IntelHub-Setup-v1.0.0-win64.exe`（Windows 安装包）
-- `IntelHub-v1.0.0-win64-portable.zip`（Windows 免安装便携版）
-- `IntelHub-v1.0.0-android-arm64.apk`（Android 64 位安装包）
+- `informationHub-Setup-v1.0.0-win64.exe`（Windows 安装包）
+- `informationHub-v1.0.0-win64-portable.zip`（Windows 免安装便携版）
+- `informationHub-v1.0.0-android-arm64.apk`（Android 64 位安装包）
 - `intel-hub-v1.0.0-linux-amd64`（Linux 静态单文件服务端）
 
 ### 3. 本地手动编译客户端与 Windows 安装包

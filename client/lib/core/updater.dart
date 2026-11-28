@@ -67,7 +67,7 @@ class AppUpdater {
     final uri = Uri.parse('https://api.github.com/repos/$slug/releases/latest');
     final headers = <String, String>{
       'Accept': 'application/vnd.github+json',
-      'User-Agent': 'IntelHub-Client/$kAppVersion',
+      'User-Agent': 'informationHub-Client/$kAppVersion',
       if (githubToken.trim().isNotEmpty) 'Authorization': 'Bearer ${githubToken.trim()}',
     };
     final resp = await http.get(uri, headers: headers).timeout(const Duration(seconds: 12));
@@ -134,13 +134,13 @@ class AppUpdater {
     if (!downloadsDir.existsSync()) {
       downloadsDir.createSync(recursive: true);
     }
-    final fileName = release.assetName ?? 'IntelHub-Setup-${release.tagName}-win64.exe';
+    final fileName = release.assetName ?? 'informationHub-Setup-${release.tagName}-win64.exe';
     final destFile = File('${downloadsDir.path}${Platform.pathSeparator}$fileName');
 
     final client = http.Client();
     try {
       final req = http.Request('GET', Uri.parse(url));
-      req.headers['User-Agent'] = 'IntelHub-Client/$kAppVersion';
+      req.headers['User-Agent'] = 'informationHub-Client/$kAppVersion';
       if (githubToken.trim().isNotEmpty) {
         req.headers['Authorization'] = 'Bearer ${githubToken.trim()}';
         req.headers['Accept'] = 'application/octet-stream';
