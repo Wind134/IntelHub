@@ -124,7 +124,7 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 	// 2. 批量拉取腾讯 CDN 行情（用于深市反算核验 + 备源）
 	txMap, _ := c.fetchTencentQuotes(ctx, watches)
 	// 3. 拉取上交所官方每日 ETF 规模（沪市主源）
-	sseMap, sseDate, _ := c.fetchSSEScaleMap(ctx)
+	sseMap, sseDate, _ := c.fetchSSEScaleMapByDate(ctx, "")
 
 	todayBJ := time.Now().In(shanghaiTZ).Format("2006-01-02")
 	latestDate := sseDate
@@ -262,6 +262,10 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 		}
 	}
 
+	if !intradayOnly {
+		c.backfillSSEHistoricalShares(ctx, watches, "2026-11-01")
+	}
+
 	c.repo.SetSyncStatus(ctx, SyncStatus{
 		Market:      "cn_etf",
 		Status:      "ok",
@@ -354,8 +358,11 @@ func (c *CNCollector) fetchTencentQuotes(ctx context.Context, watches []WatchIte
 	return out, nil
 }
 
-func (c *CNCollector) fetchSSEScaleMap(ctx context.Context) (map[string]float64, string, error) {
+func (c *CNCollector) fetchSSEScaleMapByDate(ctx context.Context, statDate string) (map[string]float64, string, error) {
 	u := "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L&isPagination=true&pageHelp.pageSize=2000&pageHelp.pageNo=1"
+	if strings.TrimSpace(statDate) != "" {
+		u += "&STAT_DATE=" + url.QueryEscape(strings.TrimSpace(statDate))
+	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	req.Header.Set("Referer", "https://www.sse.com.cn/")
 	req.Header.Set("User-Agent", "Mozilla/5.0")
@@ -375,17 +382,130 @@ func (c *CNCollector) fetchSSEScaleMap(ctx context.Context) (map[string]float64,
 		return nil, "", err
 	}
 	out := make(map[string]float64, len(payload.Result))
-	statDate := ""
+	resolvedDate := ""
 	for _, r := range payload.Result {
-		if r.StatDate > statDate {
-			statDate = r.StatDate
+		if r.StatDate > resolvedDate {
+			resolvedDate = r.StatDate
 		}
 		v, err := strconv.ParseFloat(strings.TrimSpace(r.TotVol), 64)
 		if err == nil && v > 0 {
 			out[strings.TrimSpace(r.SecCode)] = v * 10000.0
 		}
 	}
-	return out, statDate, nil
+	return out, resolvedDate, nil
+}
+
+// backfillSSEHistoricalShares 按交易日回填沪市 ETF 自 sinceDate 起的官方精确每日份额与净申赎流向。
+func (c *CNCollector) backfillSSEHistoricalShares(ctx context.Context, watches []WatchItem, sinceDate string) {
+	var shWatches []WatchItem
+	for _, w := range watches {
+		if w.Exchange == "SH" || strings.HasPrefix(w.Code, "5") {
+			shWatches = append(shWatches, w)
+		}
+	}
+	if len(shWatches) == 0 {
+		return
+	}
+
+	// 取代表性沪市 ETF 的历史交易日序列，找出待补齐官方份额的交易日（含 sinceDate 前一日作基准）
+	refSeries, _ := c.repo.GetCNETFSeries(ctx, shWatches[0].Code, 65)
+	if len(refSeries) < 2 {
+		return
+	}
+	startIdx := len(refSeries)
+	for i, d := range refSeries {
+		if d.TradeDate >= sinceDate {
+			startIdx = i
+			break
+		}
+	}
+	if startIdx >= len(refSeries) {
+		return
+	}
+	baseIdx := maxInt(0, startIdx-1)
+
+	var needDates []string
+	for i := baseIdx; i < len(refSeries); i++ {
+		if !strings.Contains(refSeries[i].SourceNote, "上交所官方") {
+			needDates = append(needDates, refSeries[i].TradeDate)
+		}
+	}
+	if len(needDates) == 0 {
+		return
+	}
+
+	log.Printf("[capital:cn] backfilling SSE official daily shares for %d trading days since %s...", len(needDates), sinceDate)
+	dateShares := make(map[string]map[string]float64, len(needDates))
+	for _, dt := range needDates {
+		if ctx.Err() != nil {
+			return
+		}
+		m, _, err := c.fetchSSEScaleMapByDate(ctx, dt)
+		if err == nil && len(m) > 0 {
+			dateShares[dt] = m
+		}
+		time.Sleep(180 * time.Millisecond)
+	}
+	if len(dateShares) == 0 {
+		return
+	}
+
+	for _, w := range shWatches {
+		series, err := c.repo.GetCNETFSeries(ctx, w.Code, 65)
+		if err != nil || len(series) < 2 {
+			continue
+		}
+		// 先填补每日官方总份额
+		touched := false
+		for i := range series {
+			if m, ok := dateShares[series[i].TradeDate]; ok {
+				if sh, exists := m[w.Code]; exists && sh > 0 {
+					series[i].TotalShares = sh
+					series[i].PrimaryShares = sh
+					series[i].VerifyStatus = "VERIFIED"
+					series[i].SourceNote = "上交所官方历史每日份额"
+					touched = true
+				}
+			}
+		}
+		if !touched {
+			continue
+		}
+		// 从基准日之后逐日精确重算 ΔS(t)、Flow_ETF(t) 及两阶段量比定性
+		var updates []CNETFDaily
+		for i := 1; i < len(series); i++ {
+			if series[i].TradeDate < sinceDate {
+				if _, ok := dateShares[series[i].TradeDate]; ok {
+					updates = append(updates, series[i])
+				}
+				continue
+			}
+			prevSh := series[i-1].TotalShares
+			curSh := series[i].TotalShares
+			if prevSh <= 0 || curSh <= 0 {
+				continue
+			}
+			px := series[i].NAV
+			if px <= 0 {
+				px = series[i].ClosePrice
+			}
+			pctJump := math.Abs(curSh-prevSh) / prevSh
+			if pctJump <= 0.30 {
+				series[i].ShareDelta = curSh - prevSh
+				series[i].NetFlowRMB = (series[i].ShareDelta * px) / 1e8
+			}
+			var prevT []float64
+			for j := maxInt(0, i-20); j < i; j++ {
+				prevT = append(prevT, series[j].TurnoverRMB)
+			}
+			series[i].VolRatio20 = ComputeVolRatio20(series[i].TurnoverRMB, prevT, 240)
+			series[i].VolumeSignal = ClassifyVolumeSignal(series[i].VolRatio20, series[i].NetFlowRMB, false)
+			updates = append(updates, series[i])
+		}
+		if len(updates) > 0 {
+			_ = c.repo.UpsertCNETFDailyBatch(ctx, updates)
+		}
+	}
 }
 
 func (c *CNCollector) fetchLatestNAV(ctx context.Context, code string) (float64, string) {
