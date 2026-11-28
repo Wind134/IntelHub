@@ -109,4 +109,11 @@ func TestTushareHelpers(t *testing.T) {
 	if len(rows) != 1 || toFloat(rows[0]["fd_share"]) != 2133201.66 {
 		t.Fatalf("unexpected parsed rows: %+v", rows)
 	}
+	// 验证真实巨额申购 (+73.9%，净值稳定) 放行，而 1拆2 折算 (份额×2，净值÷2) 被拦截
+	if isLikelySplitOrCorrupt(23.34e8, 40.59e8, 2.43, 2.50) {
+		t.Fatalf("real large subscription (+73.9%%) should NOT be blocked as split")
+	}
+	if !isLikelySplitOrCorrupt(20e8, 40e8, 4.00, 2.01) {
+		t.Fatalf("2-for-1 split (shares x2, nav /2) MUST be blocked")
+	}
 }

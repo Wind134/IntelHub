@@ -572,12 +572,15 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
                 </div>
 
                 <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <h4 className="text-sm font-semibold">国家队法定披露持仓明细</h4>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <h4 className="text-sm font-semibold">定期报告机构持仓结构</h4>
                     <span className="text-[11px] px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300">
-                      法定精确值
+                      中报 / 年报法定披露
                     </span>
                   </div>
+                  <p className="text-[11px] text-slate-400 mb-2.5">
+                    按证监会信息披露规则，公募 ETF 完整机构/个人持有人结构仅在每年中报（6/30）与年报（12/31）披露，一/三季报不披露全量结构。
+                  </p>
                   {detailHolders.length === 0 ? (
                     <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-900/40 text-xs text-slate-400">
                       该 ETF 当前未在定期报告基准池中登记国家队前十大持有人记录（仍跟踪每日官方份额申赎流向）
@@ -602,9 +605,13 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
                             </div>
                             <div>
                               <div className="text-xs font-semibold text-blue-600 dark:text-blue-400">
-                                {fmtRMBYi(h.filing_value_yi)}
+                                {h.filing_value_yi > 0
+                                  ? fmtRMBYi(h.filing_value_yi)
+                                  : fmtRMBYi((h.shares_held * (selected.nav || selected.close_price)) / 1e8)}
                               </div>
-                              <div className="text-[11px] text-slate-400">报告期末市值</div>
+                              <div className="text-[11px] text-slate-400">
+                                {h.filing_value_yi > 0 ? '报告期末市值' : '按最新净值估算'}
+                              </div>
                             </div>
                           </div>
                         </div>

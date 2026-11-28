@@ -40,6 +40,25 @@ func NewCNCollector(repo *Repo, tushareToken string) *CNCollector {
 	}
 }
 
+// isLikelySplitOrCorrupt 区分“基金份额折算/拆合股或极端脏点”与“真实巨额护盘申赎”。
+// 真实拆合股必然伴随份额与净值反向变动（S_t/S_{t-1} * NAV_t/NAV_{t-1} ≈ 1），而真实大额申购净值不受份额暴增影响。
+func isLikelySplitOrCorrupt(prevSh, curSh, prevNAV, curNAV float64) bool {
+	if prevSh <= 0 || curSh <= 0 {
+		return true
+	}
+	shRatio := curSh / prevSh
+	if shRatio > 4.0 || shRatio < 0.20 {
+		return true
+	}
+	if prevNAV > 0 && curNAV > 0 && math.Abs(shRatio-1.0) > 0.25 {
+		navRatio := curNAV / prevNAV
+		if math.Abs(shRatio*navRatio-1.0) < 0.12 {
+			return true
+		}
+	}
+	return false
+}
+
 // ComputeVolRatio20 两阶段量比计算：盘中按 m/240 进度折算，盘后按全天计算。
 func ComputeVolRatio20(turnover float64, prevTurnovers []float64, elapsedMinutes int) float64 {
 	if turnover <= 0 || len(prevTurnovers) == 0 {
@@ -217,12 +236,17 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 			latestDate = tradeDate
 		}
 
-		// 提取前 20 日成交额与前一日份额计算真实 ΔS(t) 与两阶段量比
+		// 提取前 20 日成交额与前一日份额/净值计算真实 ΔS(t) 与两阶段量比
 		var prevTurnovers []float64
 		prevShares := 0.0
+		prevNAV := 0.0
 		for _, row := range existing {
 			if row.TradeDate < tradeDate {
 				prevShares = row.TotalShares
+				prevNAV = row.NAV
+				if prevNAV <= 0 {
+					prevNAV = row.ClosePrice
+				}
 				if row.TurnoverRMB > 0 {
 					prevTurnovers = append(prevTurnovers, row.TurnoverRMB)
 				}
@@ -235,14 +259,12 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 		shareDelta := 0.0
 		netFlowYi := 0.0
 		if prevShares > 0 {
-			pctJump := math.Abs(primaryShares-prevShares) / prevShares
-			// 异常熔断门禁：无拆股单日份额跳变 > 30% 拦截保护
-			if pctJump <= 0.30 {
+			if !isLikelySplitOrCorrupt(prevShares, primaryShares, prevNAV, nav) {
 				shareDelta = primaryShares - prevShares
 				netFlowYi = (shareDelta * nav) / 1e8
 			} else {
 				verifyStatus = "WARN"
-				sourceNote = "检测到份额突变>30%，已触发异常熔断保护"
+				sourceNote = "检测到份额折算或极端突变，已触发熔断保护"
 			}
 		}
 
@@ -510,8 +532,11 @@ func (c *CNCollector) backfillSSEHistoricalShares(ctx context.Context, watches [
 			if px <= 0 {
 				px = series[i].ClosePrice
 			}
-			pctJump := math.Abs(curSh-prevSh) / prevSh
-			if pctJump <= 0.30 {
+			prevPx := series[i-1].NAV
+			if prevPx <= 0 {
+				prevPx = series[i-1].ClosePrice
+			}
+			if !isLikelySplitOrCorrupt(prevSh, curSh, prevPx, px) {
 				series[i].ShareDelta = curSh - prevSh
 				series[i].NetFlowRMB = (series[i].ShareDelta * px) / 1e8
 			}
@@ -780,7 +805,11 @@ func (c *CNCollector) backfillTushareHistoricalShares(ctx context.Context, watch
 					if px <= 0 {
 						px = series[i].ClosePrice
 					}
-					if math.Abs(curSh-prevSh)/prevSh <= 0.30 {
+					prevPx := series[i-1].NAV
+					if prevPx <= 0 {
+						prevPx = series[i-1].ClosePrice
+					}
+					if !isLikelySplitOrCorrupt(prevSh, curSh, prevPx, px) {
 						series[i].ShareDelta = curSh - prevSh
 						series[i].NetFlowRMB = (series[i].ShareDelta * px) / 1e8
 					}
@@ -843,14 +872,20 @@ func (c *CNCollector) syncInstitutionalHolders(ctx context.Context, watches []Wa
 			if err2 == nil && totSharesYi > 0 {
 				sharesHeld = totSharesYi * 1e8 * (instPct / 100.0)
 			}
+			repNAV := c.fetchHistoricalNAVOnOrBefore(ctx, w.Code, w.Exchange, repDate)
+			filingValYi := 0.0
+			if sharesHeld > 0 && repNAV > 0 {
+				filingValYi = (sharesHeld * repNAV) / 1e8
+			}
 			_ = c.repo.UpsertCNETFHolder(ctx, CNETFHolder{
-				Code:         w.Code,
-				ReportDate:   repDate,
-				ReportType:   repType,
-				HolderName:   "机构投资者合计（定期报告官方披露）",
-				SharesHeld:   sharesHeld,
-				HoldRatioPct: instPct,
-				SourceURL:    srcURL,
+				Code:          w.Code,
+				ReportDate:    repDate,
+				ReportType:    repType,
+				HolderName:    "机构投资者合计（定期报告官方披露）",
+				SharesHeld:    sharesHeld,
+				HoldRatioPct:  instPct,
+				FilingValueYi: filingValYi,
+				SourceURL:     srcURL,
 			})
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -890,13 +925,68 @@ func (c *CNCollector) syncInstitutionalHolderSinaFallback(ctx context.Context, c
 	if yr := strings.Split(p.Result.Data.CYRInfo.BDRQ, ".")[0]; len(yr) == 4 {
 		repDate = yr + "-06-30"
 	}
+	repNAV := c.fetchHistoricalNAVOnOrBefore(ctx, code, "", repDate)
+	filingValYi := 0.0
+	if sh > 0 && repNAV > 0 {
+		filingValYi = (sh * repNAV) / 1e8
+	}
 	_ = c.repo.UpsertCNETFHolder(ctx, CNETFHolder{
-		Code:         code,
-		ReportDate:   repDate,
-		ReportType:   "中报机构结构",
-		HolderName:   "机构投资者合计（定期报告官方披露）",
-		SharesHeld:   sh,
-		HoldRatioPct: pct,
-		SourceURL:    fmt.Sprintf("https://finance.sina.com.cn/fund/quotes/%s/bc.shtml", code),
+		Code:          code,
+		ReportDate:    repDate,
+		ReportType:    "中报机构结构",
+		HolderName:    "机构投资者合计（定期报告官方披露）",
+		SharesHeld:    sh,
+		HoldRatioPct:  pct,
+		FilingValueYi: filingValYi,
+		SourceURL:     fmt.Sprintf("https://finance.sina.com.cn/fund/quotes/%s/bc.shtml", code),
 	})
+}
+
+// fetchHistoricalNAVOnOrBefore 获取指定报告期末日（或之前最近交易日）的官方单位净值，用于精确计算报告期末持仓市值。
+func (c *CNCollector) fetchHistoricalNAVOnOrBefore(ctx context.Context, code, exchange, targetDate string) float64 {
+	t, err := time.Parse("2006-01-02", targetDate)
+	if err != nil {
+		return 0
+	}
+	startStr := t.AddDate(0, 0, -10).Format("2006-01-02")
+	// 1. 优先 Tushare Pro fund_nav
+	if c.ts.Enabled() {
+		if m, err := c.ts.FetchFundNAV(ctx, toTSCode(code, exchange), startStr, targetDate); err == nil && len(m) > 0 {
+			bestDate := ""
+			bestNAV := 0.0
+			for dt, nv := range m {
+				if dt <= targetDate && dt > bestDate && nv > 0 {
+					bestDate = dt
+					bestNAV = nv
+				}
+			}
+			if bestNAV > 0 {
+				return bestNAV
+			}
+		}
+	}
+	// 2. 备用：东财官方净值库按日期区间查询
+	u := fmt.Sprintf("https://api.fund.eastmoney.com/f10/lsjz?fundCode=%s&pageIndex=1&pageSize=10&startDate=%s&endDate=%s", code, startStr, targetDate)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req.Header.Set("Referer", "https://fundf10.eastmoney.com/")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	var p struct {
+		Data struct {
+			List []struct {
+				FSRQ string `json:"FSRQ"`
+				DWJZ string `json:"DWJZ"`
+			} `json:"LSJZList"`
+		} `json:"Data"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&p) == nil && len(p.Data.List) > 0 {
+		if v, err := strconv.ParseFloat(p.Data.List[0].DWJZ, 64); err == nil && v > 0 {
+			return v
+		}
+	}
+	return 0
 }
