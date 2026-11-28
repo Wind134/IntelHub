@@ -19,8 +19,19 @@ import {
   fmtSharesCN,
 } from '../api';
 import { EChartBox } from '../components/EChartBox';
+import { MobileSortBar, SortDir, SortOption, SortTh, toggleSort } from '../components/SortControl';
 
 type WindowKey = '1d' | '5d' | '20d' | '60d';
+type CNSortKey = 'total_aum_yi' | 'gov_mtm_value_yi' | 'flow_1d_yi' | 'flow_5d_yi' | 'flow_20d_yi' | 'vol_ratio_20';
+
+const CN_SORT_OPTIONS: SortOption<CNSortKey>[] = [
+  { key: 'flow_5d_yi', label: '5日净申赎' },
+  { key: 'flow_1d_yi', label: '当日净申赎' },
+  { key: 'flow_20d_yi', label: '20日净申赎' },
+  { key: 'total_aum_yi', label: '总规模' },
+  { key: 'gov_mtm_value_yi', label: '机构持仓' },
+  { key: 'vol_ratio_20', label: '量比' },
+];
 
 interface Props {
   dark: boolean;
@@ -116,6 +127,8 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
   const [win, setWin] = useState<WindowKey>('5d');
+  const [sortKey, setSortKey] = useState<CNSortKey>('flow_5d_yi');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [category, setCategory] = useState('全部');
   const [selected, setSelected] = useState<CNETFSummary | null>(null);
   const [detailSeries, setDetailSeries] = useState<CNETFDaily[]>([]);
@@ -166,10 +179,17 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
     return ['全部', ...Array.from(set)];
   }, [items]);
 
+  const handleSort = (next: CNSortKey) => {
+    const res = toggleSort(sortKey, sortDir, next);
+    setSortKey(res.key);
+    setSortDir(res.dir);
+  };
+
   const filtered = useMemo(() => {
     const list = category === '全部' ? items : items.filter((it) => it.category === category);
-    return [...list].sort((a, b) => Math.abs(getWindowFlow(b, win)) - Math.abs(getWindowFlow(a, win)));
-  }, [items, category, win]);
+    const factor = sortDir === 'desc' ? -1 : 1;
+    return [...list].sort((a, b) => (a[sortKey] - b[sortKey]) * factor);
+  }, [items, category, sortKey, sortDir]);
 
   const kpi = useMemo(() => {
     let govTotal = 0;
@@ -467,7 +487,12 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
           {(['1d', '5d', '20d', '60d'] as WindowKey[]).map((w) => (
             <button
               key={w}
-              onClick={() => setWin(w)}
+              onClick={() => {
+                setWin(w);
+                if (w === '1d') { setSortKey('flow_1d_yi'); setSortDir('desc'); }
+                else if (w === '5d') { setSortKey('flow_5d_yi'); setSortDir('desc'); }
+                else if (w === '20d') { setSortKey('flow_20d_yi'); setSortDir('desc'); }
+              }}
               className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all ${
                 win === w
                   ? 'bg-[var(--bg-card)] text-slate-900 dark:text-white shadow-xs'
@@ -539,19 +564,22 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
         </div>
       )}
 
-      {/* 桌面端表格 */}
+      {/* 手机端自由排序栏 */}
+      <MobileSortBar options={CN_SORT_OPTIONS} activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+
+      {/* 桌面端表格（支持点击任意列自由升序/降序） */}
       <div className="hidden md:block rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-left">
             <thead className="text-xs text-slate-500 dark:text-slate-400 bg-slate-50/80 dark:bg-slate-900/50 border-b border-[var(--border-subtle)]">
               <tr>
                 <th className="py-3 px-4 font-medium">ETF 名称 / 代码</th>
-                <th className="py-3 px-3 font-medium text-right">总规模</th>
-                <th className="py-3 px-3 font-medium text-right">机构持仓(占比)</th>
-                <th className="py-3 px-3 font-medium text-right">当日净申赎</th>
-                <th className="py-3 px-3 font-medium text-right">5日净申赎</th>
-                <th className="py-3 px-3 font-medium text-right">20日净申赎</th>
-                <th className="py-3 px-3 font-medium text-center">量比信号</th>
+                <SortTh colKey="total_aum_yi" label="总规模" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+                <SortTh colKey="gov_mtm_value_yi" label="机构持仓(占比)" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+                <SortTh colKey="flow_1d_yi" label="当日净申赎" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+                <SortTh colKey="flow_5d_yi" label="5日净申赎" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+                <SortTh colKey="flow_20d_yi" label="20日净申赎" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+                <SortTh colKey="vol_ratio_20" label="量比信号" activeKey={sortKey} dir={sortDir} align="center" onSort={handleSort} />
                 <th className="py-3 px-4 font-medium text-right">核验</th>
               </tr>
             </thead>

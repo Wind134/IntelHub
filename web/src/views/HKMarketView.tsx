@@ -20,6 +20,16 @@ import {
   WatchItem,
 } from '../api';
 import { EChartBox } from '../components/EChartBox';
+import { MobileSortBar, SortDir, SortOption, SortTh, toggleSort } from '../components/SortControl';
+
+type HKSortKey = 'hold_value_hkd_yi' | 'share_delta' | 'net_flow_hkd_yi' | 'flow_5d_hkd_yi';
+
+const HK_SORT_OPTIONS: SortOption<HKSortKey>[] = [
+  { key: 'net_flow_hkd_yi', label: '当日净流向' },
+  { key: 'flow_5d_hkd_yi', label: '5日净流向' },
+  { key: 'hold_value_hkd_yi', label: '港股通持仓' },
+  { key: 'share_delta', label: '持股变动' },
+];
 
 interface Props {
   dark: boolean;
@@ -58,6 +68,8 @@ const COHORT_META: Record<string, { label: string; color: string; badge: string 
 
 export const HKMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
   const [subTab, setSubTab] = useState<SubTab>('southbound');
+  const [sortKey, setSortKey] = useState<HKSortKey>('net_flow_hkd_yi');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [items, setItems] = useState<HKSouthboundDaily[]>([]);
   const [watchlist, setWatchlist] = useState<WatchItem[]>([]);
   const [settlementDate, setSettlementDate] = useState('');
@@ -183,6 +195,17 @@ export const HKMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
       ],
     };
   }, [items, dark]);
+
+  const handleSort = (next: HKSortKey) => {
+    const res = toggleSort(sortKey, sortDir, next);
+    setSortKey(res.key);
+    setSortDir(res.dir);
+  };
+
+  const sortedItems = useMemo(() => {
+    const factor = sortDir === 'desc' ? -1 : 1;
+    return [...items].sort((a, b) => (a[sortKey] - b[sortKey]) * factor);
+  }, [items, sortKey, sortDir]);
 
   const latestSnap = detailSnaps[0];
 
@@ -314,6 +337,8 @@ export const HKMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
             </div>
           )}
 
+          <MobileSortBar options={HK_SORT_OPTIONS} activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+
           {/* 桌面表格 */}
           <div className="hidden md:block rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] overflow-hidden">
             <div className="overflow-x-auto">
@@ -321,10 +346,10 @@ export const HKMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
                 <thead className="text-xs text-slate-500 dark:text-slate-400 bg-slate-50/80 dark:bg-slate-900/50 border-b border-[var(--border-subtle)]">
                   <tr>
                     <th className="py-3 px-4 font-medium">标的 / 代码</th>
-                    <th className="py-3 px-3 font-medium text-right">港股通持仓(占比)</th>
-                    <th className="py-3 px-3 font-medium text-right">持股变动</th>
-                    <th className="py-3 px-3 font-medium text-right">当日净流向</th>
-                    <th className="py-3 px-3 font-medium text-right">5日净流向</th>
+                    <SortTh colKey="hold_value_hkd_yi" label="港股通持仓(占比)" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+                    <SortTh colKey="share_delta" label="持股变动" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+                    <SortTh colKey="net_flow_hkd_yi" label="当日净流向" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+                    <SortTh colKey="flow_5d_hkd_yi" label="5日净流向" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
                     <th className="py-3 px-4 font-medium text-right">CCASS 席位</th>
                   </tr>
                 </thead>
@@ -336,7 +361,7 @@ export const HKMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
                       </td>
                     </tr>
                   ) : (
-                    items.slice(0, 60).map((it) => (
+                    sortedItems.slice(0, 60).map((it) => (
                       <tr
                         key={it.code}
                         onClick={() => openStockDetail(it.code, it.name)}
@@ -375,7 +400,7 @@ export const HKMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
 
           {/* 手机端堆叠卡片 */}
           <div className="md:hidden space-y-2.5">
-            {items.slice(0, 50).map((it) => (
+            {sortedItems.slice(0, 50).map((it) => (
               <button
                 key={it.code}
                 onClick={() => openStockDetail(it.code, it.name)}

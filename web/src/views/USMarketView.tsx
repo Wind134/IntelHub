@@ -18,6 +18,15 @@ import {
   USStockConsensus,
 } from '../api';
 import { EChartBox } from '../components/EChartBox';
+import { MobileSortBar, SortDir, SortOption, SortTh, toggleSort } from '../components/SortControl';
+
+type USSortKey = 'holder_count' | 'total_filing_usd' | 'aggregate_flow_usd';
+
+const US_SORT_OPTIONS: SortOption<USSortKey>[] = [
+  { key: 'aggregate_flow_usd', label: '估算净流向' },
+  { key: 'total_filing_usd', label: '持仓市值' },
+  { key: 'holder_count', label: '持有机构数' },
+];
 
 interface Props {
   dark: boolean;
@@ -60,6 +69,8 @@ function ActionBadge({ action }: { action: string }) {
 
 export const USMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
   const [subTab, setSubTab] = useState<SubTab>('consensus');
+  const [sortKey, setSortKey] = useState<USSortKey>('aggregate_flow_usd');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [institutions, setInstitutions] = useState<US13FFiling[]>([]);
   const [consensus, setConsensus] = useState<USStockConsensus[]>([]);
   const [loading, setLoading] = useState(true);
@@ -202,6 +213,17 @@ export const USMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
     };
   }, [consensus, dark]);
 
+  const handleSort = (next: USSortKey) => {
+    const res = toggleSort(sortKey, sortDir, next);
+    setSortKey(res.key);
+    setSortDir(res.dir);
+  };
+
+  const sortedConsensus = useMemo(() => {
+    const factor = sortDir === 'desc' ? -1 : 1;
+    return [...consensus].sort((a, b) => (a[sortKey] - b[sortKey]) * factor);
+  }, [consensus, sortKey, sortDir]);
+
   const activeInst = institutions.find((i) => i.cik === activeCik);
 
   return (
@@ -293,6 +315,8 @@ export const USMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
             </div>
           )}
 
+          <MobileSortBar options={US_SORT_OPTIONS} activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+
           {/* 桌面端抱团表格 */}
           <div className="hidden md:block rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] overflow-hidden">
             <div className="overflow-x-auto">
@@ -300,10 +324,10 @@ export const USMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
                 <thead className="text-xs text-slate-500 dark:text-slate-400 bg-slate-50/80 dark:bg-slate-900/50 border-b border-[var(--border-subtle)]">
                   <tr>
                     <th className="py-3 px-4 font-medium">标的 / CUSIP</th>
-                    <th className="py-3 px-3 font-medium text-center">持有机构</th>
+                    <SortTh colKey="holder_count" label="持有机构" activeKey={sortKey} dir={sortDir} align="center" onSort={handleSort} />
                     <th className="py-3 px-3 font-medium text-center">增持 / 减持</th>
-                    <th className="py-3 px-3 font-medium text-right">机构合计持仓市值</th>
-                    <th className="py-3 px-3 font-medium text-right">区间估算净流向</th>
+                    <SortTh colKey="total_filing_usd" label="机构合计持仓市值" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+                    <SortTh colKey="aggregate_flow_usd" label="区间估算净流向" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
                     <th className="py-3 px-4 font-medium text-right">明细</th>
                   </tr>
                 </thead>
@@ -315,7 +339,7 @@ export const USMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
                       </td>
                     </tr>
                   ) : (
-                    consensus.slice(0, 60).map((c) => (
+                    sortedConsensus.slice(0, 60).map((c) => (
                       <tr
                         key={`${c.cusip}-${c.ticker}`}
                         onClick={() => openStockModal(c.ticker || c.cusip, c.issuer_name)}
@@ -352,7 +376,7 @@ export const USMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
 
           {/* 手机端堆叠卡片 */}
           <div className="md:hidden space-y-2.5">
-            {consensus.slice(0, 50).map((c) => (
+            {sortedConsensus.slice(0, 50).map((c) => (
               <button
                 key={`${c.cusip}-${c.ticker}`}
                 onClick={() => openStockModal(c.ticker || c.cusip, c.issuer_name)}
