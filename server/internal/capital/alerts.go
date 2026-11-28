@@ -72,21 +72,19 @@ func (c *CNCollector) maybeEmitIntradayAlert(ctx context.Context, w WatchItem, r
 
 	ev := &model.IntelEvent{
 		EventCode:          fmt.Sprintf("CAP-CN-%s-%s-L%d", strings.ReplaceAll(row.TradeDate, "-", ""), w.Code, level),
-		Title:              title,
-		Summary:            summary,
-		RawContent:         rawMD,
 		SourceName:         "三地资金流向看板 · A股盘中监控",
-		SourceType:         "capital_cn_intraday",
 		Category:           "finance",
-		Score:              score,
-		Tier:               "P1",
-		Confidence:         0.92,
+		RawTitle:           title,
+		ZhTitle:            title,
+		Summary:            summary,
+		ImpactAnalysis:     rawMD,
 		Entities:           []string{w.Name, w.Code, w.Category, "国家队ETF"},
-		ImpactNote:         "A股国家队核心宽基 ETF 盘中显著放量预警",
+		Score:              score,
+		Tier:               model.TierFromScore(score),
+		PushStatus:         "pushed",
 		VerificationStatus: "confirmed",
 		VerificationNote:   "盘中实时成交额按 m/240 折算量比触发",
 		PublishedAt:        time.Now().Unix(),
-		PushStatus:         "pushed",
 	}
 	log.Printf("[capital:alert] emitting intraday alert: %s", title)
 	c.onAlert(ctx, ev)
@@ -176,21 +174,19 @@ func (c *CNCollector) maybeEmitEODSummaryAlert(ctx context.Context, todayBJ stri
 
 	ev := &model.IntelEvent{
 		EventCode:          fmt.Sprintf("CAP-CN-EOD-%s", strings.ReplaceAll(todayBJ, "-", "")),
-		Title:              title,
-		Summary:            summary,
-		RawContent:         rawMD,
 		SourceName:         "三地资金流向看板 · 盘后三源定性",
-		SourceType:         "capital_cn_eod",
 		Category:           "finance",
-		Score:              9,
-		Tier:               "P1",
-		Confidence:         0.98,
+		RawTitle:           title,
+		ZhTitle:            title,
+		Summary:            summary,
+		ImpactAnalysis:     rawMD,
 		Entities:           []string{"国家队ETF", "沪深300", "中证500", "中证1000"},
-		ImpactNote:         "A股国家队核心宽基 ETF 盘后官方份额大额净申赎定性简报",
+		Score:              9,
+		Tier:               model.TierFromScore(9),
+		PushStatus:         "pushed",
 		VerificationStatus: "confirmed",
 		VerificationNote:   "上交所官方 + Tushare Pro fund_share 三源核验",
 		PublishedAt:        time.Now().Unix(),
-		PushStatus:         "pushed",
 	}
 	log.Printf("[capital:alert] emitting EOD summary alert: %s", title)
 	c.onAlert(ctx, ev)
