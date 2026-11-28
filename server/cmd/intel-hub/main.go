@@ -159,6 +159,13 @@ func runServe(args []string) {
 		log.Fatalf("capital migrate failed: %v", err)
 	}
 	capEngine := capital.NewEngine(capRepo, cfg.Server.TushareToken, cfg.Server.SECUserAgent)
+	capEngine.SetAlertSink(func(ctx context.Context, ev *model.IntelEvent) {
+		saved, err := st.InsertEvent(ctx, ev)
+		if err != nil || saved == nil {
+			return
+		}
+		srv.OnEventCreated(ctx, saved)
+	})
 	capEngine.Start(ctx)
 	var capSrv *http.Server
 	if strings.TrimSpace(cfg.Server.CapitalWebAddr) != "" {

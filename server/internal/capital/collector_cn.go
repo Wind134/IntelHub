@@ -24,6 +24,7 @@ type CNCollector struct {
 	ts         *TushareClient
 	http       *http.Client
 	onProgress ProgressFunc
+	onAlert    AlertSink
 }
 
 func (c *CNCollector) report(cur, total int, stage string) {
@@ -198,7 +199,7 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 				volRatio = ComputeVolRatio20(em.TurnoverRMB, prevTurnovers, elapsedMin)
 				sig = ClassifyVolumeSignal(volRatio, 0, true)
 			}
-			updates = append(updates, CNETFDaily{
+			row := CNETFDaily{
 				Code:          w.Code,
 				TradeDate:     todayBJ,
 				TotalShares:   prevShares,
@@ -213,7 +214,9 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 				VerifyStatus:  "SINGLE_SOURCE",
 				SourceNote:    "盘中实时成交量比观测（份额净申赎待收盘后官方清算）",
 				PrimaryShares: prevShares,
-			})
+			}
+			updates = append(updates, row)
+			c.maybeEmitIntradayAlert(ctx, w, row)
 		}
 		if len(updates) > 0 {
 			_ = c.repo.UpsertCNETFDailyBatch(ctx, updates)
@@ -386,6 +389,9 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 		ItemCount:   synced,
 		SourceLabel: srcLabel,
 	})
+	if !intradayOnly && latestDate == todayBJ {
+		c.maybeEmitEODSummaryAlert(ctx, todayBJ)
+	}
 	return nil
 }
 

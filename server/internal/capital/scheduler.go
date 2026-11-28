@@ -64,6 +64,12 @@ func NewEngine(repo *Repo, tushareToken, secUA string) *Engine {
 	return e
 }
 
+func (e *Engine) SetAlertSink(fn AlertSink) {
+	if e.CN != nil {
+		e.CN.onAlert = fn
+	}
+}
+
 func (e *Engine) MarkSyncQueued(market string) {
 	markets := expandMarkets(market)
 	now := time.Now().Unix()

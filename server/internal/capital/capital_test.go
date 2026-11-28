@@ -129,4 +129,11 @@ func TestTushareHelpers(t *testing.T) {
 	if newYorkTZ.String() != "America/New_York" {
 		t.Fatalf("expected America/New_York tz, got %s", newYorkTZ.String())
 	}
+	// 验证国家队核心宽基过滤规则
+	if !IsCoreBroadIndexETF("沪深300") || !IsCoreBroadIndexETF("科创板") {
+		t.Fatalf("broad index categories should be whitelisted for alerts")
+	}
+	if IsCoreBroadIndexETF("医药消费") || IsCoreBroadIndexETF("大金融") {
+		t.Fatalf("sector ETFs should not trigger core broad-index alerts")
+	}
 }
