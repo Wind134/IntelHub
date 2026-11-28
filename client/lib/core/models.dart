@@ -11,6 +11,7 @@ class IntelEvent {
   final String impactAnalysis;
   final String canonicalUrl;
   final List<String> entities;
+  final List<String> followUps;
   final Map<String, dynamic> quoteSnapshot;
   final int score;
   final String tier;
@@ -34,6 +35,7 @@ class IntelEvent {
     required this.impactAnalysis,
     required this.canonicalUrl,
     required this.entities,
+    this.followUps = const [],
     required this.quoteSnapshot,
     required this.score,
     required this.tier,
@@ -70,6 +72,7 @@ class IntelEvent {
       impactAnalysis: (j['impact_analysis'] as String?) ?? '',
       canonicalUrl: (j['canonical_url'] as String?) ?? '',
       entities: ((j['entities'] as List?) ?? const []).map((e) => e.toString()).toList(),
+      followUps: ((j['follow_ups'] as List?) ?? const []).map((e) => e.toString()).where((e) => e.trim().isNotEmpty).toList(),
       quoteSnapshot: quote,
       score: (j['score'] as num?)?.toInt() ?? 5,
       tier: (j['tier'] as String?) ?? 'P2_DIGEST',
@@ -95,6 +98,7 @@ class IntelEvent {
         'impact_analysis': impactAnalysis,
         'canonical_url': canonicalUrl,
         'entities': entities,
+        'follow_ups': followUps,
         'quote_snapshot': quoteSnapshot,
         'score': score,
         'tier': tier,
@@ -125,6 +129,7 @@ class IntelEvent {
       impactAnalysis: impactAnalysis,
       canonicalUrl: canonicalUrl,
       entities: entities,
+      followUps: followUps,
       quoteSnapshot: quoteSnapshot,
       score: score,
       tier: tier,

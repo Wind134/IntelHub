@@ -1069,8 +1069,8 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
         if (_navIndex != 0 && _navIndex != 1) _navIndex = 0;
       });
       _bumpDetail();
-      final isWide = MediaQuery.of(context).size.width >= 960;
-      if (!isWide) {
+      final isSplit = MediaQuery.sizeOf(context).width >= 840;
+      if (!isSplit) {
         _pushMobileDetailPage(detail.event);
       }
     } catch (_) {}
@@ -1201,8 +1201,8 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
             ],
           ),
           content: SizedBox(
-            width: 640,
-            height: 420,
+            width: (MediaQuery.sizeOf(ctx).width - 64).clamp(280.0, 640.0),
+            height: (MediaQuery.sizeOf(ctx).height * 0.56).clamp(260.0, 440.0),
             child: Column(
               children: [
                 TextField(
@@ -1538,7 +1538,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
             ],
           ),
           content: SizedBox(
-            width: 500,
+            width: (MediaQuery.sizeOf(context).width - 64).clamp(280.0, 500.0),
             child: SingleChildScrollView(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1670,7 +1670,10 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
 
   @override
   Widget build(BuildContext context) {
-    final isWide = MediaQuery.of(context).size.width >= 960;
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    // Material 3 window classes: <600 compact phone, 600-839 tablet portrait (rail), >=840 tablet landscape & desktop (rail + split pane)
+    final useRail = screenWidth >= 600;
+    final useSplit = screenWidth >= 840;
     final cs = Theme.of(context).colorScheme;
 
     if (!_bootstrapped) {
@@ -1719,10 +1722,14 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
       body: Column(
         children: [
           if (Platform.isWindows) _buildWindowsTitleBar(cs),
-          Expanded(child: isWide ? _buildDesktopBody(cs) : _buildMobileBody(cs)),
+          Expanded(
+            child: useRail
+                ? _buildAdaptiveRailBody(cs, useSplit: useSplit, screenWidth: screenWidth)
+                : _buildMobileBody(cs),
+          ),
         ],
       ),
-      bottomNavigationBar: isWide
+      bottomNavigationBar: useRail
           ? null
           : Container(
               decoration: BoxDecoration(border: Border(top: BorderSide(color: cs.outline, width: 0.7))),
@@ -1757,37 +1764,9 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                   children: [
                     Image.asset('assets/app_icon_squircle.png', width: 24, height: 24, filterQuality: FilterQuality.high),
                     const SizedBox(width: 10),
-                    Text('informationHub', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5, color: cs.onSurface)),
+                    Text('informationHub', style: Theme.of(context).textTheme.titleSmall),
                     const SizedBox(width: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: (_wsConnected ? const Color(0xFF10B981) : const Color(0xFFF59E0B)).withValues(alpha: 0.14),
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            width: 6,
-                            height: 6,
-                            decoration: BoxDecoration(
-                              color: _wsConnected ? const Color(0xFF10B981) : const Color(0xFFF59E0B),
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          const SizedBox(width: 5),
-                          Text(
-                            _wsConnected ? '实时在线' : '重连中',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w500,
-                              color: _wsConnected ? const Color(0xFF10B981) : const Color(0xFFD97706),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+                    _buildOnlineStatusPill(),
                   ],
                 ),
               ),
@@ -1824,58 +1803,128 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     );
   }
 
-  /// IndexedStack keeps scroll positions & widgets warm across tabs (0ms instant switch!).
-  Widget _buildDesktopBody(ColorScheme cs) {
+  /// Shared adaptive layout for Windows Desktop & Android Tablets (portrait rail + landscape split pane).
+  Widget _buildAdaptiveRailBody(ColorScheme cs, {required bool useSplit, required double screenWidth}) {
     final detailWidget = RepaintBoundary(
       child: ValueListenableBuilder<int>(
         valueListenable: _detailTick,
         builder: (_, __, ___) => _buildDetailPane(),
       ),
     );
+    const railWidth = 78.0;
+    final listWidth = ((screenWidth - railWidth) * 0.38).clamp(320.0, 440.0);
 
-    return Row(
+    Widget buildEventTab(bool isArchive) {
+      if (!useSplit) {
+        return _buildEventListPane(isArchiveMode: isArchive, openDetailAsPage: true, showHeaderTitle: true);
+      }
+      return Row(
+        children: [
+          SizedBox(width: listWidth, child: _buildEventListPane(isArchiveMode: isArchive)),
+          VerticalDivider(width: 1, color: cs.outline),
+          Expanded(child: detailWidget),
+        ],
+      );
+    }
+
+    final body = Column(
       children: [
-        Container(
-          width: 78,
-          decoration: BoxDecoration(
-            color: cs.surfaceContainerLow,
-            border: Border(right: BorderSide(color: cs.outline, width: 1)),
-          ),
-          child: Column(
-            children: [
-              const SizedBox(height: 14),
-              _RailItem(icon: Icons.bolt_rounded, label: '实时流', selected: _navIndex == 0, onTap: () => _onNavChanged(0)),
-              _RailItem(icon: Icons.manage_search_rounded, label: '历史库', selected: _navIndex == 1, onTap: () => _onNavChanged(1)),
-              _RailItem(icon: Icons.menu_book_rounded, label: '内参', selected: _navIndex == 2, onTap: () => _onNavChanged(2)),
-              _RailItem(icon: Icons.tune_rounded, label: '系统', selected: _navIndex == 3, onTap: () => _onNavChanged(3)),
-            ],
-          ),
-        ),
+        if (!Platform.isWindows) _buildTabletHeaderBar(cs),
         Expanded(
-          child: FluidIndexedStack(
-            index: _navIndex,
-            axis: Axis.vertical,
+          child: Row(
             children: [
-              Row(
-                children: [
-                  SizedBox(width: 440, child: _buildEventListPane(isArchiveMode: false)),
-                  VerticalDivider(width: 1, color: cs.outline),
-                  Expanded(child: detailWidget),
-                ],
+              Container(
+                width: railWidth,
+                decoration: BoxDecoration(
+                  color: cs.surfaceContainerLow,
+                  border: Border(right: BorderSide(color: cs.outline, width: 1)),
+                ),
+                child: Column(
+                  children: [
+                    const SizedBox(height: 14),
+                    _RailItem(icon: Icons.bolt_rounded, label: '实时流', selected: _navIndex == 0, onTap: () => _onNavChanged(0)),
+                    _RailItem(icon: Icons.manage_search_rounded, label: '历史库', selected: _navIndex == 1, onTap: () => _onNavChanged(1)),
+                    _RailItem(icon: Icons.menu_book_rounded, label: '内参', selected: _navIndex == 2, onTap: () => _onNavChanged(2)),
+                    _RailItem(icon: Icons.tune_rounded, label: '系统', selected: _navIndex == 3, onTap: () => _onNavChanged(3)),
+                  ],
+                ),
               ),
-              Row(
-                children: [
-                  SizedBox(width: 440, child: _buildEventListPane(isArchiveMode: true)),
-                  VerticalDivider(width: 1, color: cs.outline),
-                  Expanded(child: detailWidget),
-                ],
+              Expanded(
+                child: FluidIndexedStack(
+                  index: _navIndex,
+                  axis: Axis.vertical,
+                  children: [
+                    buildEventTab(false),
+                    buildEventTab(true),
+                    _buildDigestView(cs),
+                    _buildSettingsAndDashboardView(cs),
+                  ],
+                ),
               ),
-              _buildDigestView(cs),
-              _buildSettingsAndDashboardView(cs),
             ],
           ),
         ),
       ],
+    );
+
+    if (Platform.isWindows) return body;
+    return SafeArea(child: body);
+  }
+
+  Widget _buildOnlineStatusPill() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: (_wsConnected ? const Color(0xFF10B981) : const Color(0xFFF59E0B)).withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(
+              color: _wsConnected ? const Color(0xFF10B981) : const Color(0xFFF59E0B),
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 5),
+          Text(
+            _wsConnected ? '实时在线' : '重连中',
+            style: (Theme.of(context).textTheme.labelSmall ?? const TextStyle()).copyWith(
+              fontSize: 11,
+              color: _wsConnected ? const Color(0xFF10B981) : const Color(0xFFD97706),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTabletHeaderBar(ColorScheme cs) {
+    return Container(
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerLow,
+        border: Border(bottom: BorderSide(color: cs.outline, width: 1)),
+      ),
+      child: Row(
+        children: [
+          Image.asset('assets/app_icon_squircle.png', width: 24, height: 24, filterQuality: FilterQuality.high),
+          const SizedBox(width: 10),
+          Text('informationHub', style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(width: 10),
+          _buildOnlineStatusPill(),
+          const Spacer(),
+          IconButton(
+            tooltip: '切换主题（当前：${_themeLabel()}）',
+            onPressed: _cycleThemeMode,
+            icon: Icon(_themeIcon(), size: 20),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1888,17 +1937,17 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
             child: Row(
               children: [
                 AnimatedSwitcher(
-                  duration: Duration(milliseconds: widget.highFpsMotion ? 220 : 0),
-                  transitionBuilder: (child, anim) {
-                    final curved = CurvedAnimation(parent: anim, curve: Curves.easeOutCubic);
-                    return FadeTransition(
-                      opacity: curved,
-                      child: SlideTransition(
-                        position: Tween<Offset>(begin: const Offset(0, 0.18), end: Offset.zero).animate(curved),
-                        child: child,
-                      ),
-                    );
-                  },
+                  duration: Duration(milliseconds: widget.highFpsMotion ? 240 : 0),
+                  switchInCurve: const Interval(0.35, 1.0, curve: Curves.easeOutCubic),
+                  switchOutCurve: const Interval(0.0, 0.35, curve: Curves.easeInCubic),
+                  layoutBuilder: (currentChild, previousChildren) => Stack(
+                    alignment: Alignment.centerLeft,
+                    children: [
+                      ...previousChildren,
+                      if (currentChild != null) currentChild,
+                    ],
+                  ),
+                  transitionBuilder: (child, anim) => FadeTransition(opacity: anim, child: child),
                   child: Text(
                     switch (_navIndex) {
                       0 => '实时突发',
@@ -2278,7 +2327,13 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                 ),
               ],
               const SizedBox(height: 16),
-              IntelSummaryReader(summary: ev.summary, sourceName: ev.sourceName),
+              IntelSummaryReader(
+                summary: ev.summary,
+                sourceName: ev.sourceName,
+                onOpenOriginal: ev.canonicalUrl.isNotEmpty
+                    ? () => launchUrl(Uri.parse(ev.canonicalUrl), mode: LaunchMode.externalApplication)
+                    : null,
+              ),
               if (ev.entities.isNotEmpty) ...[
                 const SizedBox(height: 18),
                 Wrap(
@@ -2442,7 +2497,9 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
   }
 
   Widget _buildDigestView(ColorScheme cs) {
-    final isWide = MediaQuery.of(context).size.width >= 900;
+    final screenW = MediaQuery.sizeOf(context).width;
+    final isWide = screenW >= 840;
+    final digestListW = (screenW * 0.28).clamp(260.0, 320.0);
     final listWidget = Column(
       children: [
         Padding(
@@ -2541,7 +2598,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     if (!isWide) return listWidget;
     return Row(
       children: [
-        SizedBox(width: 300, child: listWidget),
+        SizedBox(width: digestListW, child: listWidget),
         VerticalDivider(width: 1, color: cs.outline),
         Expanded(child: contentWidget),
       ],
@@ -2564,12 +2621,15 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     }.toList()
       ..sort();
 
+    final screenW = MediaQuery.sizeOf(context).width;
+    final horizontalPad = screenW >= 1040 ? ((screenW - 78 - 920) / 2).clamp(24.0, 120.0) : (screenW >= 600 ? 24.0 : 16.0);
+
     return FluidScrollArea(
       controller: _settingsScrollCtrl,
       child: ListView(
         controller: _settingsScrollCtrl,
         physics: fluidScrollPhysics(widget.highFpsMotion),
-        padding: const EdgeInsets.all(22),
+        padding: EdgeInsets.symmetric(horizontal: horizontalPad, vertical: 22),
         children: [
         // 0. Account & Encrypted Cloud Config Binding
         Text('账号与加密云同步', style: Theme.of(context).textTheme.titleLarge),
@@ -3298,14 +3358,13 @@ class _RailItem extends StatelessWidget {
                     child: Icon(icon, size: 21, color: selected ? cs.primary : cs.onSurface.withValues(alpha: 0.65)),
                   ),
                   const SizedBox(height: 4),
-                  AnimatedDefaultTextStyle(
-                    duration: dur,
-                    style: TextStyle(
+                  Text(
+                    label,
+                    style: (Theme.of(context).textTheme.labelSmall ?? const TextStyle()).copyWith(
                       fontSize: 11.5,
-                      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                      color: selected ? cs.primary : cs.onSurface.withValues(alpha: 0.65),
+                      fontWeight: selected ? FontWeight.w600 : (Platform.isWindows ? FontWeight.w400 : FontWeight.w500),
+                      color: selected ? cs.primary : cs.onSurface.withValues(alpha: 0.72),
                     ),
-                    child: Text(label),
                   ),
                 ],
               ),
@@ -3359,9 +3418,9 @@ class _CompactPill extends StatelessWidget {
             ],
             Text(
               label,
-              style: TextStyle(
+              style: (Theme.of(context).textTheme.labelMedium ?? const TextStyle()).copyWith(
                 fontSize: 12.5,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                fontWeight: selected ? FontWeight.w600 : (Platform.isWindows ? FontWeight.w400 : FontWeight.w500),
                 color: selected ? cs.primary : cs.onSurface,
               ),
             ),

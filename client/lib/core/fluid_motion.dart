@@ -233,36 +233,52 @@ class _FluidInteractiveCardState extends State<FluidInteractiveCard> with Single
   }
 }
 
+/// Material 3 Emphasized Decelerate / Accelerate curves for native Android motion feel.
+const Cubic _kM3EmphasizedDecelerate = Cubic(0.05, 0.7, 0.1, 1.0);
+const Cubic _kM3EmphasizedAccelerate = Cubic(0.3, 0.0, 0.8, 0.15);
+
 class FluidPageRoute<T> extends PageRouteBuilder<T> {
   FluidPageRoute({
     required WidgetBuilder builder,
     bool fluid = true,
   }) : super(
-          transitionDuration: Duration(milliseconds: fluid ? 280 : 140),
-          reverseTransitionDuration: Duration(milliseconds: fluid ? 240 : 120),
+          transitionDuration: Duration(milliseconds: fluid ? 300 : 120),
+          reverseTransitionDuration: Duration(milliseconds: fluid ? 240 : 100),
           pageBuilder: (context, animation, secondaryAnimation) => builder(context),
           transitionsBuilder: (context, animation, secondaryAnimation, child) {
             if (!fluid) return child;
-            final curved = CurvedAnimation(
+            final inSlide = Tween<Offset>(
+              begin: const Offset(0.18, 0),
+              end: Offset.zero,
+            ).animate(CurvedAnimation(
               parent: animation,
-              curve: Curves.easeOutCubic,
-              reverseCurve: Curves.easeInCubic,
+              curve: _kM3EmphasizedDecelerate,
+              reverseCurve: _kM3EmphasizedAccelerate,
+            ));
+            final inFade = CurvedAnimation(
+              parent: animation,
+              curve: const Interval(0.0, 0.4, curve: Curves.easeOut),
+              reverseCurve: const Interval(0.6, 1.0, curve: Curves.easeIn),
             );
-            return FadeTransition(
-              opacity: curved,
+            final outParallax = Tween<Offset>(
+              begin: Offset.zero,
+              end: const Offset(-0.06, 0),
+            ).animate(CurvedAnimation(
+              parent: secondaryAnimation,
+              curve: _kM3EmphasizedDecelerate,
+            ));
+            return SlideTransition(
+              position: outParallax,
               child: SlideTransition(
-                position: Tween<Offset>(begin: const Offset(0.08, 0), end: Offset.zero).animate(curved),
-                child: ScaleTransition(
-                  scale: Tween<double>(begin: 0.98, end: 1.0).animate(curved),
-                  child: child,
-                ),
+                position: inSlide,
+                child: FadeTransition(opacity: inFade, child: child),
               ),
             );
           },
         );
 }
 
-/// 保留各 Tab 滚动状态的同时提供方向感切入过渡动画（桌面纵向随侧栏上下，移动端横向随底栏左右）。
+/// Material 3 标准 Fade-Through 顶层切页容器：旧页先在 0~30% 淡出消失，新页再从 30%~100% 缩放淡入，彻底杜绝双页重叠残影，同时保留各 Tab 滚动位置。
 class FluidIndexedStack extends StatefulWidget {
   final int index;
   final List<Widget> children;
@@ -280,10 +296,11 @@ class FluidIndexedStack extends StatefulWidget {
 }
 
 class _FluidIndexedStackState extends State<FluidIndexedStack> with SingleTickerProviderStateMixin {
+  static const double _exitEnd = 0.30;
+
   late final AnimationController _ctrl;
   late int _currentIndex;
   int? _previousIndex;
-  int _direction = 1;
 
   @override
   void initState() {
@@ -291,7 +308,7 @@ class _FluidIndexedStackState extends State<FluidIndexedStack> with SingleTicker
     _currentIndex = widget.index;
     _ctrl = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 260),
+      duration: const Duration(milliseconds: 280),
       value: 1.0,
     )..addStatusListener((st) {
         if (st == AnimationStatus.completed && mounted && _previousIndex != null) {
@@ -304,7 +321,6 @@ class _FluidIndexedStackState extends State<FluidIndexedStack> with SingleTicker
   void didUpdateWidget(covariant FluidIndexedStack oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.index != _currentIndex) {
-      _direction = widget.index > _currentIndex ? 1 : -1;
       _previousIndex = _currentIndex;
       _currentIndex = widget.index;
       final fluid = FluidMotionScope.of(context);
@@ -333,38 +349,37 @@ class _FluidIndexedStackState extends State<FluidIndexedStack> with SingleTicker
     return AnimatedBuilder(
       animation: _ctrl,
       builder: (_, __) {
-        final t = Curves.easeOutCubic.transform(_ctrl.value);
-        final inOffset = widget.axis == Axis.horizontal
-            ? Offset((1.0 - t) * 0.055 * _direction, 0)
-            : Offset(0, (1.0 - t) * 0.035 * _direction);
-        final outOffset = widget.axis == Axis.horizontal
-            ? Offset(-t * 0.03 * _direction, 0)
-            : Offset(0, -t * 0.02 * _direction);
-        final inScale = 0.986 + 0.014 * t;
+        final v = _ctrl.value;
+        final isExiting = _previousIndex != null && _ctrl.isAnimating && v < _exitEnd;
+        final exitT = (v / _exitEnd).clamp(0.0, 1.0);
+        final outOpacity = 1.0 - _kM3EmphasizedAccelerate.transform(exitT);
+
+        final enterRaw = ((v - _exitEnd) / (1.0 - _exitEnd)).clamp(0.0, 1.0);
+        final enterT = _kM3EmphasizedDecelerate.transform(enterRaw);
+        final inOpacity = isExiting ? 0.0 : enterT;
+        final inScale = isExiting ? 0.96 : (0.96 + 0.04 * enterT);
 
         return Stack(
           fit: StackFit.expand,
           children: [
             for (var i = 0; i < widget.children.length; i++)
               if (i == _currentIndex)
-                Opacity(
-                  opacity: t.clamp(0.0, 1.0),
-                  child: FractionalTranslation(
-                    translation: inOffset,
+                IgnorePointer(
+                  ignoring: isExiting,
+                  child: Opacity(
+                    opacity: inOpacity.clamp(0.0, 1.0),
                     child: Transform.scale(
                       scale: inScale,
+                      alignment: Alignment.center,
                       child: widget.children[i],
                     ),
                   ),
                 )
-              else if (i == _previousIndex && _ctrl.isAnimating)
+              else if (i == _previousIndex && isExiting)
                 IgnorePointer(
                   child: Opacity(
-                    opacity: (1.0 - t).clamp(0.0, 1.0),
-                    child: FractionalTranslation(
-                      translation: outOffset,
-                      child: widget.children[i],
-                    ),
+                    opacity: outOpacity.clamp(0.0, 1.0),
+                    child: widget.children[i],
                   ),
                 )
               else

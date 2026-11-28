@@ -2,12 +2,19 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
-/// ColorOS 17 (Aquamorphic) + Modern Windows 11 unified Light & Dark design system
-/// with tuned Windows DirectWrite CJK font rendering.
+/// ColorOS 17 (Aquamorphic) + Modern Windows 11 unified Light & Dark design system.
+/// Windows pairs Segoe UI (Latin/digits) with Microsoft YaHei UI fallback (CJK) to avoid jagged CJK weights.
 class AppTheme {
-  static String? get _fontFamily => Platform.isWindows ? 'Microsoft YaHei UI' : null;
+  static String? get _fontFamily => Platform.isWindows ? 'Segoe UI' : null;
   static List<String>? get _fontFallback =>
-      Platform.isWindows ? const ['Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei', 'sans-serif'] : null;
+      Platform.isWindows ? const ['Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI Emoji'] : null;
+
+  static const PageTransitionsTheme _pageTransitions = PageTransitionsTheme(
+    builders: {
+      TargetPlatform.android: PredictiveBackPageTransitionsBuilder(),
+      TargetPlatform.windows: FadeUpwardsPageTransitionsBuilder(),
+    },
+  );
 
   static TextTheme _buildTextTheme(Color primary, Color secondary) {
     final base = TextStyle(
@@ -16,6 +23,8 @@ class AppTheme {
       letterSpacing: 0,
       color: primary,
     );
+    // Microsoft YaHei UI lacks a native w500 face; use w400 on Windows to keep CJK strokes crisp and uniform.
+    final labelWeight = Platform.isWindows ? FontWeight.w400 : FontWeight.w500;
     return TextTheme(
       headlineSmall: base.copyWith(fontSize: 20, fontWeight: FontWeight.w600, height: 1.35),
       titleLarge: base.copyWith(fontSize: 18, fontWeight: FontWeight.w600, height: 1.35),
@@ -24,9 +33,9 @@ class AppTheme {
       bodyLarge: base.copyWith(fontSize: 14.5, fontWeight: FontWeight.w400, height: 1.6),
       bodyMedium: base.copyWith(fontSize: 13.5, fontWeight: FontWeight.w400, height: 1.55),
       bodySmall: base.copyWith(fontSize: 12, fontWeight: FontWeight.w400, height: 1.45, color: secondary),
-      labelLarge: base.copyWith(fontSize: 13, fontWeight: FontWeight.w500),
-      labelMedium: base.copyWith(fontSize: 12, fontWeight: FontWeight.w500, color: secondary),
-      labelSmall: base.copyWith(fontSize: 11, fontWeight: FontWeight.w500, color: secondary),
+      labelLarge: base.copyWith(fontSize: 13, fontWeight: labelWeight),
+      labelMedium: base.copyWith(fontSize: 12, fontWeight: labelWeight, color: secondary),
+      labelSmall: base.copyWith(fontSize: 11, fontWeight: labelWeight, color: secondary),
     );
   }
 
@@ -44,8 +53,10 @@ class AppTheme {
       brightness: Brightness.light,
       fontFamily: _fontFamily,
       fontFamilyFallback: _fontFallback,
+      pageTransitionsTheme: _pageTransitions,
       scaffoldBackgroundColor: canvas,
       textTheme: _buildTextTheme(textPrimary, textSecondary),
+      primaryTextTheme: _buildTextTheme(textPrimary, textSecondary),
       colorScheme: const ColorScheme.light(
         primary: accent,
         onPrimary: Colors.white,
@@ -102,8 +113,9 @@ class AppTheme {
           final sel = states.contains(WidgetState.selected);
           return TextStyle(
             fontFamily: _fontFamily,
+            fontFamilyFallback: _fontFallback,
             fontSize: 11.5,
-            fontWeight: sel ? FontWeight.w600 : FontWeight.w500,
+            fontWeight: sel ? FontWeight.w600 : (Platform.isWindows ? FontWeight.w400 : FontWeight.w500),
             color: sel ? accent : textSecondary,
           );
         }),
@@ -141,8 +153,10 @@ class AppTheme {
       brightness: Brightness.dark,
       fontFamily: _fontFamily,
       fontFamilyFallback: _fontFallback,
+      pageTransitionsTheme: _pageTransitions,
       scaffoldBackgroundColor: canvas,
       textTheme: _buildTextTheme(textPrimary, textSecondary),
+      primaryTextTheme: _buildTextTheme(textPrimary, textSecondary),
       colorScheme: const ColorScheme.dark(
         primary: accent,
         onPrimary: Colors.white,
@@ -199,8 +213,9 @@ class AppTheme {
           final sel = states.contains(WidgetState.selected);
           return TextStyle(
             fontFamily: _fontFamily,
+            fontFamilyFallback: _fontFallback,
             fontSize: 11.5,
-            fontWeight: sel ? FontWeight.w600 : FontWeight.w500,
+            fontWeight: sel ? FontWeight.w600 : (Platform.isWindows ? FontWeight.w400 : FontWeight.w500),
             color: sel ? const Color(0xFF60A5FA) : textSecondary,
           );
         }),

@@ -1,7 +1,15 @@
 import 'models.dart';
 
-/// 根据事件标题、领域、核心实体与影响推演，零延迟生成 3 条高相关 AI 深度追问建议。
+/// 优先使用服务端 AI 裁判直出的内容定制追问标签；旧归档记录无 AI 标签时回退至精细主题规则。
 List<String> buildSmartFollowUpPrompts(IntelEvent ev) {
+  final aiPrompts = ev.followUps
+      .map((e) => e.trim())
+      .where((e) => e.isNotEmpty)
+      .toList();
+  if (aiPrompts.isNotEmpty) {
+    return aiPrompts.take(3).toList();
+  }
+
   final text = '${ev.zhTitle} ${ev.summary} ${ev.impactAnalysis}'.toLowerCase();
   final entities = ev.entities
       .map((e) => e.trim())
@@ -42,44 +50,61 @@ List<String> buildSmartFollowUpPrompts(IntelEvent ev) {
     addPrompt('梳理对科技成长股与高股息板块的估值再定价影响');
     addPrompt('对比市场此前预期，挖掘最容易被忽略的二阶风险');
   }
-  // 4. AI 大模型 / 算力 / 芯片
-  else if (ev.category == 'ai' || _hasAny(text, ['大模型', '模型', '开源', '算力', 'gpu', '芯片', 'openai', 'claude', 'deepseek', 'nvidia'])) {
+  // 4. 航空 / 交通 / 安全事故与监管调查
+  else if (_hasAny(text, ['客机', '航班', '机场', '波音', '空客', 'faa', '擦碰', '停飞', '事故', '空管'])) {
+    if (e1.isNotEmpty && e2.isNotEmpty) {
+      addPrompt('复盘 $e1 与 $e2 近期同类安全事件及监管审查重点');
+    } else if (e1.isNotEmpty) {
+      addPrompt('分析本次事件对 $e1 运力调度、口碑及安全审查的影响');
+    }
+    addPrompt('梳理 FAA 等监管机构可能采取的后续调查与整改措施');
+    addPrompt('核查涉事机场或机型近年安全记录与关键隐患');
+  }
+  // 5. 网络安全 / 漏洞 / 宕机事故
+  else if (_hasAny(text, ['漏洞', 'cve', 'cvss', '0-day', 'zero-day', '宕机', '中断', '攻击', '勒索'])) {
+    if (e1.isNotEmpty) {
+      addPrompt('梳理 $e1 该漏洞/故障的受影响范围与紧急缓解方案');
+    }
+    addPrompt('评估对云服务商与企业级客户的业务连续性风险');
+    addPrompt('总结官方补丁进度与后续需要监控的安全信号');
+  }
+  // 6. AI 大模型 / 算力 / 芯片
+  else if (ev.category == 'ai' || _hasAny(text, ['大模型', '模型', '开源', '算力', 'gpu', '芯片', 'openai', 'claude', 'deepseek', 'gemini', 'nvidia'])) {
     if (e1.isNotEmpty) {
       addPrompt('深度对比 $e1 此次进展与主流竞品的技术及成本差距');
     }
-    addPrompt('评估对算力产业链（GPU/光模块/云厂商）与应用层的影响');
+    addPrompt('评估对算力产业链（GPU/云厂商）与应用层的实际影响');
     addPrompt('判断商业化落地节奏及下一阶段关键催化节点');
   }
-  // 5. 财报 / 并购 / 大厂战略
+  // 7. 财报 / 并购 / 大厂战略
   else if (_hasAny(text, ['财报', '营收', '利润', '指引', '收购', '并购', '反垄断', '裁员', '股价', '异动'])) {
     if (e1.isNotEmpty) {
       addPrompt('拆解 $e1 此次事件的核心超预期点与隐含基本面变化');
     }
     addPrompt('梳理上下游受益与受损标的及产业链连锁反应');
-    addPrompt('总结华尔街多空分歧焦点与后续跟踪指标');
+    addPrompt('总结市场多空分歧焦点与后续跟踪指标');
   }
-  // 6. 地缘冲突 / 国际突发
-  else if (ev.category == 'world' || _hasAny(text, ['冲突', '制裁', '谈判', '停火', '战争', '原油', '航运', '选举'])) {
+  // 8. 真正涉及地缘冲突/能源航运/制裁时才推送地缘大宗维度
+  else if (_hasAny(text, ['冲突', '制裁', '停火', '战争', '军演', '封锁', '导弹', '原油', '航运', '选举', '外交'])) {
     if (e1.isNotEmpty) {
       addPrompt('推演 $e1 事态升级或缓和的三种可能情景');
     }
-    addPrompt('评估对全球大宗商品（原油/黄金）与供应链的直接冲击');
+    addPrompt('评估对大宗商品（原油/黄金）与国际航运供应链的直接冲击');
     addPrompt('列出未来 72 小时最值得关注的外交与市场信号');
   }
 
-  // 通用实体兜底补足至 3 条
   if (out.length < 3 && e1.isNotEmpty) {
-    addPrompt('深入分析对 $e1 及上下游相关标的的实质影响');
+    addPrompt('梳理「$e1」此事的来龙去脉与核心争议点');
   }
   if (out.length < 3) {
     addPrompt(
       ev.category == 'finance'
           ? '梳理受该消息影响最大的核心标的与交易逻辑'
-          : '核查事件前因后果与历史同类事件演变路径',
+          : '核查该事件的背景脉络与历史同类案例演变',
     );
   }
   if (out.length < 3) {
-    addPrompt('总结最核心的潜在风险点与下一步关键观察信号');
+    addPrompt('总结后续最关键的进展节点与潜在风险');
   }
   return out.take(3).toList();
 }

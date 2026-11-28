@@ -89,6 +89,13 @@ func (e *Engine) ProcessOne(ctx context.Context, raw model.RawItem) *model.Intel
 		return nil
 	}
 
+	// Enrich short RSS teasers (<90 runes) from article HTML before AI scoring
+	if shouldFetchArticleExcerpt(raw.SourceType, raw.URL, raw.Summary) {
+		if excerpt := fetchArticleExcerpt(ctx, raw.URL, raw.TraditionalZh); len([]rune(excerpt)) > len([]rune(raw.Summary))+40 {
+			raw.Summary = excerpt
+		}
+	}
+
 	// L4a: On-demand attribution search if triggered by Finnhub stock price anomaly
 	extraContext := ""
 	if raw.SourceType == "finnhub_ws" && e.enricher != nil && e.enricher.Enabled() {
@@ -141,6 +148,7 @@ func (e *Engine) ProcessOne(ctx context.Context, raw model.RawItem) *model.Intel
 		ImpactAnalysis:     scored.Impact,
 		CanonicalURL:       raw.URL,
 		Entities:           scored.Entities,
+		FollowUps:          scored.FollowUps,
 		QuoteSnapshot:      raw.QuoteSnapshot,
 		Score:              scored.Score,
 		Tier:               tier,

@@ -28,6 +28,7 @@ type IntelEvent struct {
 	ImpactAnalysis     string   `json:"impact_analysis"`
 	CanonicalURL       string   `json:"canonical_url"`
 	Entities           []string `json:"entities"`
+	FollowUps          []string `json:"follow_ups,omitempty"`
 	QuoteSnapshot      string   `json:"quote_snapshot,omitempty"`
 	Score              int      `json:"score"`
 	Tier               string   `json:"tier"` // P1_CRITICAL | P1_HIGH | P2_DIGEST | P3_ARCHIVE
@@ -50,6 +51,7 @@ type ScoreResult struct {
 	ZhTitle         string   `json:"zh_title"`
 	Impact          string   `json:"impact"`
 	Entities        []string `json:"entities"`
+	FollowUps       []string `json:"follow_ups,omitempty"`
 	PrimaryTopicKey string   `json:"primary_topic_key"`
 }
 
