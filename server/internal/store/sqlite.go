@@ -146,6 +146,7 @@ CREATE TABLE IF NOT EXISTS intel_events (
     impact_analysis     TEXT NOT NULL DEFAULT '',
     canonical_url       TEXT NOT NULL,
     entities_json       TEXT NOT NULL DEFAULT '[]',
+    follow_ups_json     TEXT NOT NULL DEFAULT '[]',
     quote_snapshot_json TEXT NOT NULL DEFAULT '{}',
     score               INTEGER NOT NULL,
     tier                TEXT NOT NULL,
@@ -295,6 +296,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
 	}
 	// Safe additive column migration for existing databases
 	_, _ = s.writeDB.Exec(`ALTER TABLE intel_events ADD COLUMN feishu_message_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.writeDB.Exec(`ALTER TABLE intel_events ADD COLUMN follow_ups_json TEXT NOT NULL DEFAULT '[]'`)
 	return s.migrateAuth()
 }
 
@@ -415,6 +417,10 @@ func (s *Store) InsertEvent(ctx context.Context, ev *model.IntelEvent) (*model.I
 	if len(ev.Entities) == 0 {
 		entitiesJSON = []byte("[]")
 	}
+	followUpsJSON, _ := json.Marshal(ev.FollowUps)
+	if len(ev.FollowUps) == 0 {
+		followUpsJSON = []byte("[]")
+	}
 
 	searchTokens := BuildCJKSearchTokens(ev.EventCode, ev.ZhTitle, ev.RawTitle, ev.Summary, ev.ImpactAnalysis, strings.Join(ev.Entities, " "))
 
@@ -433,11 +439,11 @@ func (s *Store) InsertEvent(ctx context.Context, ev *model.IntelEvent) (*model.I
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO intel_events (
 			event_code, source_name, category, raw_title, zh_title, summary, impact_analysis,
-			canonical_url, entities_json, quote_snapshot_json, score, tier, is_bookmarked, user_note,
+			canonical_url, entities_json, follow_ups_json, quote_snapshot_json, score, tier, is_bookmarked, user_note,
 			push_status, verification_status, verification_note, search_tokens, published_at, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, tempCode, ev.SourceName, ev.Category, ev.RawTitle, ev.ZhTitle, ev.Summary, ev.ImpactAnalysis,
-		ev.CanonicalURL, string(entitiesJSON), ev.QuoteSnapshot, ev.Score, ev.Tier, boolToInt(ev.IsBookmarked), ev.UserNote,
+		ev.CanonicalURL, string(entitiesJSON), string(followUpsJSON), ev.QuoteSnapshot, ev.Score, ev.Tier, boolToInt(ev.IsBookmarked), ev.UserNote,
 		ev.PushStatus, ev.VerificationStatus, ev.VerificationNote, searchTokens, ev.PublishedAt, ev.CreatedAt, ev.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -549,7 +555,7 @@ func (s *Store) GetEventByCode(ctx context.Context, code string) (*model.IntelEv
 
 const selectEventCols = `
 SELECT e.id, e.event_code, e.source_name, e.category, e.raw_title, e.zh_title, e.summary,
-       e.impact_analysis, e.canonical_url, e.entities_json, e.quote_snapshot_json,
+       e.impact_analysis, e.canonical_url, e.entities_json, e.follow_ups_json, e.quote_snapshot_json,
        e.score, e.tier, e.is_bookmarked, e.user_note, e.push_status,
        e.verification_status, e.verification_note, e.feishu_message_id, e.published_at, e.created_at, e.updated_at`
 
@@ -1248,19 +1254,20 @@ type rowScanner interface {
 func scanEvent(r rowScanner, hasSnippet bool) (*model.IntelEvent, error) {
 	var ev model.IntelEvent
 	var entitiesRaw string
+	var followUpsRaw string
 	var bookmarked int
 	var err error
 	if hasSnippet {
 		err = r.Scan(
 			&ev.ID, &ev.EventCode, &ev.SourceName, &ev.Category, &ev.RawTitle, &ev.ZhTitle, &ev.Summary,
-			&ev.ImpactAnalysis, &ev.CanonicalURL, &entitiesRaw, &ev.QuoteSnapshot,
+			&ev.ImpactAnalysis, &ev.CanonicalURL, &entitiesRaw, &followUpsRaw, &ev.QuoteSnapshot,
 			&ev.Score, &ev.Tier, &bookmarked, &ev.UserNote, &ev.PushStatus,
 			&ev.VerificationStatus, &ev.VerificationNote, &ev.FeishuMessageID, &ev.PublishedAt, &ev.CreatedAt, &ev.UpdatedAt, &ev.Snippet,
 		)
 	} else {
 		err = r.Scan(
 			&ev.ID, &ev.EventCode, &ev.SourceName, &ev.Category, &ev.RawTitle, &ev.ZhTitle, &ev.Summary,
-			&ev.ImpactAnalysis, &ev.CanonicalURL, &entitiesRaw, &ev.QuoteSnapshot,
+			&ev.ImpactAnalysis, &ev.CanonicalURL, &entitiesRaw, &followUpsRaw, &ev.QuoteSnapshot,
 			&ev.Score, &ev.Tier, &bookmarked, &ev.UserNote, &ev.PushStatus,
 			&ev.VerificationStatus, &ev.VerificationNote, &ev.FeishuMessageID, &ev.PublishedAt, &ev.CreatedAt, &ev.UpdatedAt,
 		)
@@ -1273,6 +1280,7 @@ func scanEvent(r rowScanner, hasSnippet bool) (*model.IntelEvent, error) {
 	if ev.Entities == nil {
 		ev.Entities = []string{}
 	}
+	_ = json.Unmarshal([]byte(followUpsRaw), &ev.FollowUps)
 	return &ev, nil
 }
 

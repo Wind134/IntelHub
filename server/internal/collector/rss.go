@@ -157,10 +157,7 @@ func (p *FeedPoller) fetchRSS(ctx context.Context, feed config.FeedConfig, prevE
 	nowTS := time.Now().Unix()
 	out := make([]model.RawItem, 0, len(parsed.Items))
 	for _, it := range parsed.Items {
-		summary := it.Description
-		if summary == "" {
-			summary = it.Content
-		}
+		summary := pickRicherSummary(it.Description, it.Content)
 		if feed.Type == "status_atom" && isRoutineStatusMaintenance(it.Title, summary) {
 			continue
 		}
@@ -205,6 +202,40 @@ func clampPublishedTS(ts, now int64) int64 {
 		return now
 	}
 	return ts
+}
+
+// pickRicherSummary chooses between RSS <description> and <content:encoded>, preferring full body over short teasers.
+func pickRicherSummary(desc, content string) string {
+	d := strings.TrimSpace(desc)
+	c := strings.TrimSpace(content)
+	if c == "" {
+		return d
+	}
+	if d == "" {
+		return c
+	}
+	if len([]rune(stripQuickHTML(c))) > len([]rune(stripQuickHTML(d)))+30 {
+		return c
+	}
+	return d
+}
+
+func stripQuickHTML(s string) string {
+	var b strings.Builder
+	inTag := false
+	for _, r := range s {
+		switch r {
+		case '<':
+			inTag = true
+		case '>':
+			inTag = false
+		default:
+			if !inTag {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // isRoutineStatusMaintenance filters out routine scheduled PoP/datacenter maintenance notices

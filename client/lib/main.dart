@@ -2327,7 +2327,13 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                 ),
               ],
               const SizedBox(height: 16),
-              IntelSummaryReader(summary: ev.summary, sourceName: ev.sourceName),
+              IntelSummaryReader(
+                summary: ev.summary,
+                sourceName: ev.sourceName,
+                onOpenOriginal: ev.canonicalUrl.isNotEmpty
+                    ? () => launchUrl(Uri.parse(ev.canonicalUrl), mode: LaunchMode.externalApplication)
+                    : null,
+              ),
               if (ev.entities.isNotEmpty) ...[
                 const SizedBox(height: 18),
                 Wrap(

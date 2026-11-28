@@ -377,7 +377,7 @@ func (c *Client) ScoreEvent(ctx context.Context, item model.RawItem, extraContex
 	}
 
 	sysPrompt := `你是全天候金融与科技突发情报裁判。请评估以下消息的突发紧迫度与行业影响，严格仅输出一个 JSON 对象，不要包含 Markdown 代码块或任何多余文字：
-{"score":1-10整数,"category":"finance|ai|bigtech|world","zh_title":"18字内高密度简体中文标题","impact":"60字内核心事实与市场/行业影响推演","entities":["大写英文代码或中文实体名"],"primary_topic_key":"category:核心实体大写"}
+{"score":1-10整数,"category":"finance|ai|bigtech|world","zh_title":"18字内高密度简体中文标题","impact":"60字内核心事实与市场/行业影响推演","entities":["大写英文代码或中文实体名"],"primary_topic_key":"category:核心实体大写","follow_ups":["3条紧扣本文具体事实的深度追问，每条14-24字，直接围绕文中主体/数据/因果，禁止套用宏观/原油/外交等无关模板"]}
 评分标准：
 9-10分(P1特急)：重大黑天鹅、美股核心标的剧烈异动(>4%)、美联储意外决议、旗舰基座模型发布/开源、主力AI API大面积宕机、百亿美元并购/反垄断重罚、影响全球供应链的重大冲突或0-day。
 8分(P1重要)：明确高价值突发新闻、重要高管变动、大厂战略转向、核心芯片/AI重要进展。
@@ -435,6 +435,7 @@ func (c *Client) ScoreEvent(ctx context.Context, item model.RawItem, extraContex
 		if res.ZhTitle == "" {
 			res.ZhTitle = truncateRunes(item.Title, 24)
 		}
+		res.FollowUps = sanitizeFollowUps(res.FollowUps)
 		return res, usage.TotalTokens, nil
 	}
 
@@ -889,4 +890,27 @@ func truncateRunes(s string, max int) string {
 		return s
 	}
 	return string(r[:max]) + "…"
+}
+
+func sanitizeFollowUps(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(items))
+	out := make([]string, 0, 3)
+	for _, raw := range items {
+		s := strings.TrimSpace(raw)
+		if s == "" || seen[s] {
+			continue
+		}
+		if len([]rune(s)) > 36 {
+			s = truncateRunes(s, 34)
+		}
+		seen[s] = true
+		out = append(out, s)
+		if len(out) >= 3 {
+			break
+		}
+	}
+	return out
 }

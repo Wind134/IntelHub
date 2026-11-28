@@ -102,6 +102,16 @@ func (f *FeishuNotifier) SendDigestCard(ctx context.Context, d model.DailyDigest
 	if !f.Enabled() {
 		return nil
 	}
+	elements := buildFeishuMarkdownElements(d.ContentMD, 3400, true)
+	elements = append(elements, map[string]any{
+		"tag": "note",
+		"elements": []any{
+			map[string]any{
+				"tag":     "plain_text",
+				"content": "完整排版可在 Windows / Android 客户端「内参」页随时回看",
+			},
+		},
+	})
 	card := map[string]any{
 		"config": map[string]any{"wide_screen_mode": true},
 		"header": map[string]any{
@@ -111,27 +121,104 @@ func (f *FeishuNotifier) SendDigestCard(ctx context.Context, d model.DailyDigest
 				"content": fmt.Sprintf("📘 %s · %s (%d条精选)", d.DigestDate, d.Title, d.EventCount),
 			},
 		},
-		"elements": []any{
-			map[string]any{
-				"tag":     "markdown",
-				"content": truncateRunes(d.ContentMD, 3200),
-			},
-			map[string]any{
-				"tag": "note",
-				"elements": []any{
-					map[string]any{
-						"tag":     "plain_text",
-						"content": "完整排版可在 Windows / Android 客户端「内参」页随时回看",
-					},
-				},
-			},
-		},
+		"elements": elements,
 	}
 	if strings.TrimSpace(f.cfg.FeishuWebhook) != "" {
 		return f.sendWebhook(ctx, card)
 	}
 	_, err := f.sendAppMessage(ctx, card)
 	return err
+}
+
+// buildFeishuMarkdownElements converts standard Markdown (including # headings, > blockquotes, and --- rules,
+// which Feishu Card v1 markdown tag does not natively render) into crisp Feishu card elements.
+func buildFeishuMarkdownElements(md string, maxRunes int, skipTopH1 bool) []any {
+	src := strings.ReplaceAll(truncateRunes(strings.TrimSpace(md), maxRunes), "\r\n", "\n")
+	lines := strings.Split(src, "\n")
+
+	var elements []any
+	var cur []string
+	flush := func() {
+		block := strings.TrimSpace(strings.Join(cur, "\n"))
+		cur = cur[:0]
+		if block != "" {
+			elements = append(elements, map[string]any{
+				"tag":     "markdown",
+				"content": block,
+			})
+		}
+	}
+
+	firstNonEmpty := true
+	for _, rawLine := range lines {
+		trimmed := strings.TrimSpace(rawLine)
+		if trimmed == "" {
+			if len(cur) > 0 && cur[len(cur)-1] != "" {
+				cur = append(cur, "")
+			}
+			continue
+		}
+
+		// Horizontal rule -> native Feishu hr divider
+		if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+			flush()
+			if len(elements) > 0 {
+				elements = append(elements, map[string]any{"tag": "hr"})
+			}
+			firstNonEmpty = false
+			continue
+		}
+
+		// H1 heading: skip if it duplicates the card header title on the first line
+		if strings.HasPrefix(trimmed, "# ") {
+			title := strings.TrimSpace(strings.TrimPrefix(trimmed, "# "))
+			if skipTopH1 && firstNonEmpty {
+				firstNonEmpty = false
+				continue
+			}
+			firstNonEmpty = false
+			cur = append(cur, fmt.Sprintf("<font color='blue'>**%s**</font>", title))
+			continue
+		}
+		firstNonEmpty = false
+
+		// H2 section heading -> visual divider + bold blue section bar
+		if strings.HasPrefix(trimmed, "## ") {
+			title := strings.TrimSpace(strings.TrimPrefix(trimmed, "## "))
+			flush()
+			if len(elements) > 0 {
+				if last, ok := elements[len(elements)-1].(map[string]any); !ok || last["tag"] != "hr" {
+					elements = append(elements, map[string]any{"tag": "hr"})
+				}
+			}
+			cur = append(cur, fmt.Sprintf("<font color='blue'>**▍ %s**</font>", title))
+			continue
+		}
+
+		// H3 / H4 subheading
+		if strings.HasPrefix(trimmed, "### ") || strings.HasPrefix(trimmed, "#### ") {
+			title := strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
+			cur = append(cur, fmt.Sprintf("**▸ %s**", title))
+			continue
+		}
+
+		// Blockquote -> clean vertical bar accent supported by Feishu markdown
+		if strings.HasPrefix(trimmed, ">") {
+			quote := strings.TrimSpace(strings.TrimPrefix(trimmed, ">"))
+			if quote != "" {
+				cur = append(cur, fmt.Sprintf("<font color='grey'>┃</font> %s", quote))
+			}
+			continue
+		}
+
+		cur = append(cur, rawLine)
+	}
+	flush()
+
+	if len(elements) == 0 {
+		elements = append(elements, map[string]any{"tag": "markdown", "content": truncateRunes(md, maxRunes)})
+	}
+	return elements
 }
 
 func buildFeishuCard(ev *model.IntelEvent) map[string]any {

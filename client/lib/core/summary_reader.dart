@@ -8,11 +8,13 @@ import 'package:flutter/services.dart';
 class IntelSummaryReader extends StatefulWidget {
   final String summary;
   final String sourceName;
+  final VoidCallback? onOpenOriginal;
 
   const IntelSummaryReader({
     super.key,
     required this.summary,
     required this.sourceName,
+    this.onOpenOriginal,
   });
 
   @override
@@ -152,6 +154,37 @@ class _IntelSummaryReaderState extends State<IntelSummaryReader> {
                 onPressed: () => setState(() => _expanded = !_expanded),
                 icon: Icon(_expanded ? Icons.expand_less_rounded : Icons.expand_more_rounded, size: 18),
                 label: Text(_expanded ? '收起正文' : '展开全部 ${paragraphs.length} 段'),
+              ),
+            ),
+          ] else if (text.length < 75 && widget.onOpenOriginal != null) ...[
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: cs.surfaceContainerLowest,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: cs.outline.withValues(alpha: 0.7)),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.info_outline_rounded, size: 15, color: cs.onSurface.withValues(alpha: 0.55)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '信源仅提供简短导语，可点击右侧阅读完整原文',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                  TextButton.icon(
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    onPressed: widget.onOpenOriginal,
+                    icon: const Icon(Icons.open_in_new_rounded, size: 14),
+                    label: const Text('阅读原文'),
+                  ),
+                ],
               ),
             ),
           ],
