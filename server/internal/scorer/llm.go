@@ -206,7 +206,7 @@ func (c *Client) ScoreEvent(ctx context.Context, item model.RawItem, extraContex
 9-10分(P1特急)：重大黑天鹅、美股核心标的剧烈异动(>4%)、美联储意外决议、旗舰基座模型发布/开源、主力AI API大面积宕机、百亿美元并购/反垄断重罚、影响全球供应链的重大冲突或0-day。
 8分(P1重要)：明确高价值突发新闻、重要高管变动、大厂战略转向、核心芯片/AI重要进展。
 5-7分(P2次级)：有价值的行业动态、财报常规解读、普通产品更新，适合归入晚间日报。
-1-4分(噪音)：观点水文、软广、无实质增量的常规报道。`
+1-4分(噪音)：观点水文、软广、无实质增量的常规报道；以及缺乏明确新闻事实与上下文背景的 X/Twitter 简短回复、表情或泛泛感叹（哪怕出自马斯克等名人，无实质增量也必须压低至 1-3 分）。`
 
 	userText := fmt.Sprintf("信源: %s (%s)\n提示领域: %s\n标题: %s\n摘要: %s",
 		item.SourceName, item.SourceType, item.CategoryHint, item.Title, truncateRunes(item.Summary, 600))

@@ -1,6 +1,9 @@
 package collector
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestClampPublishedTS(t *testing.T) {
 	now := int64(1795800000)
@@ -30,5 +33,36 @@ func TestIsRoutineStatusMaintenance(t *testing.T) {
 	}
 	if isRoutineStatusMaintenance("Scheduled Maintenance causing Major Outage", "Unexpected service disruption during maintenance.") {
 		t.Fatalf("expected maintenance escalated to outage to pass")
+	}
+}
+
+func TestBuildTweetRawItem(t *testing.T) {
+	// 1. 纯表情与单词回复必须直接过滤
+	for _, junk := range []string{"❤️", "Yes", "Yup", "It is very useful", "Exactly. https://t.co/abc"} {
+		if _, keep := buildTweetRawItem(twitterTweet{
+			ID:     "1",
+			Text:   junk,
+			Author: twitterAuthor{UserName: "elonmusk"},
+		}, false); keep {
+			t.Fatalf("expected low-signal tweet %q to be filtered out", junk)
+		}
+	}
+
+	// 2. 带完整原推上下文的引用评论应当保留并自动补全原推背景
+	item, keep := buildTweetRawItem(twitterTweet{
+		ID:     "2",
+		Text:   "True",
+		Author: twitterAuthor{UserName: "elonmusk"},
+		QuotedTweet: &twitterQuoted{
+			ID:     "100",
+			Text:   "SpaceX Starship Flight 9 just received FAA launch license for next week orbital test.",
+			Author: twitterAuthor{UserName: "SpaceX"},
+		},
+	}, false)
+	if !keep {
+		t.Fatalf("expected substantive quoted tweet to be kept")
+	}
+	if !strings.Contains(item.Summary, "原推上下文") || !strings.Contains(item.Summary, "Starship Flight 9") {
+		t.Fatalf("expected quoted context embedded in summary, got: %s", item.Summary)
 	}
 }

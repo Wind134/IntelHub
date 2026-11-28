@@ -14,6 +14,7 @@ import 'core/api_client.dart';
 import 'core/app_theme.dart';
 import 'core/auth_screen.dart';
 import 'core/fluid_motion.dart';
+import 'core/follow_up_suggestions.dart';
 import 'core/markdown_view.dart';
 import 'core/models.dart';
 import 'core/summary_reader.dart';
@@ -1843,8 +1844,9 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
           ),
         ),
         Expanded(
-          child: IndexedStack(
+          child: FluidIndexedStack(
             index: _navIndex,
+            axis: Axis.vertical,
             children: [
               Row(
                 children: [
@@ -1877,14 +1879,28 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
             padding: const EdgeInsets.fromLTRB(18, 10, 12, 4),
             child: Row(
               children: [
-                Text(
-                  switch (_navIndex) {
-                    0 => '实时突发',
-                    1 => '历史情报库',
-                    2 => '每日内参',
-                    _ => '系统与模型',
+                AnimatedSwitcher(
+                  duration: Duration(milliseconds: widget.highFpsMotion ? 220 : 0),
+                  transitionBuilder: (child, anim) {
+                    final curved = CurvedAnimation(parent: anim, curve: Curves.easeOutCubic);
+                    return FadeTransition(
+                      opacity: curved,
+                      child: SlideTransition(
+                        position: Tween<Offset>(begin: const Offset(0, 0.18), end: Offset.zero).animate(curved),
+                        child: child,
+                      ),
+                    );
                   },
-                  style: Theme.of(context).textTheme.headlineSmall,
+                  child: Text(
+                    switch (_navIndex) {
+                      0 => '实时突发',
+                      1 => '历史情报库',
+                      2 => '每日内参',
+                      _ => '系统与模型',
+                    },
+                    key: ValueKey(_navIndex),
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
                 ),
                 const SizedBox(width: 8),
                 Container(
@@ -1905,8 +1921,9 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
             ),
           ),
           Expanded(
-            child: IndexedStack(
+            child: FluidIndexedStack(
               index: _navIndex,
+              axis: Axis.horizontal,
               children: [
                 _buildEventListPane(isArchiveMode: false, openDetailAsPage: true, showHeaderTitle: false),
                 _buildEventListPane(isArchiveMode: true, openDetailAsPage: true, showHeaderTitle: false),
@@ -2302,11 +2319,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                 spacing: 8,
                 runSpacing: 8,
                 children: [
-                  for (final preset in const [
-                    '分析对相关美股标的与产业链的影响',
-                    '核查背景脉络与历史同类事件演变',
-                    '总结核心风险点与后续关注信号',
-                  ])
+                  for (final preset in buildSmartFollowUpPrompts(ev))
                     _CompactPill(label: preset, selected: false, onTap: () => _askEventAI(preset)),
                 ],
               ),
@@ -3242,34 +3255,56 @@ class _RailItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final dur = Duration(milliseconds: FluidMotionScope.of(context) ? 220 : 0);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       child: InkWell(
         borderRadius: BorderRadius.circular(14),
         onTap: onTap,
-        child: AnimatedContainer(
-          duration: Duration(milliseconds: FluidMotionScope.of(context) ? 180 : 0),
-          curve: Curves.easeOutCubic,
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          decoration: BoxDecoration(
-            color: selected ? cs.primary.withValues(alpha: 0.14) : Colors.transparent,
-            borderRadius: BorderRadius.circular(14),
-          ),
-          child: Column(
-            children: [
-              Icon(icon, size: 21, color: selected ? cs.primary : cs.onSurface.withValues(alpha: 0.65)),
-              const SizedBox(height: 4),
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 11.5,
-                  fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                  color: selected ? cs.primary : cs.onSurface.withValues(alpha: 0.65),
-                ),
+        child: Stack(
+          alignment: Alignment.centerLeft,
+          children: [
+            AnimatedContainer(
+              duration: dur,
+              curve: Curves.easeOutCubic,
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              decoration: BoxDecoration(
+                color: selected ? cs.primary.withValues(alpha: 0.14) : Colors.transparent,
+                borderRadius: BorderRadius.circular(14),
               ),
-            ],
-          ),
+              child: Column(
+                children: [
+                  AnimatedScale(
+                    scale: selected ? 1.08 : 1.0,
+                    duration: dur,
+                    curve: Curves.easeOutBack,
+                    child: Icon(icon, size: 21, color: selected ? cs.primary : cs.onSurface.withValues(alpha: 0.65)),
+                  ),
+                  const SizedBox(height: 4),
+                  AnimatedDefaultTextStyle(
+                    duration: dur,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                      color: selected ? cs.primary : cs.onSurface.withValues(alpha: 0.65),
+                    ),
+                    child: Text(label),
+                  ),
+                ],
+              ),
+            ),
+            AnimatedContainer(
+              duration: dur,
+              curve: Curves.easeOutCubic,
+              width: 3.5,
+              height: selected ? 24 : 0,
+              decoration: BoxDecoration(
+                color: cs.primary,
+                borderRadius: BorderRadius.circular(99),
+              ),
+            ),
+          ],
         ),
       ),
     );
