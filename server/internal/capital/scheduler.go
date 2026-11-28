@@ -7,6 +7,22 @@ import (
 	"time"
 )
 
+// ProgressFunc 用于采集器向调度引擎上报细粒度同步进度。
+type ProgressFunc func(cur, total int, stage string)
+
+// SyncProgress 描述单个市场当前或最近一次后台同步任务的实时进度。
+type SyncProgress struct {
+	Market     string `json:"market"`
+	Running    bool   `json:"running"`
+	Stage      string `json:"stage"`
+	Current    int    `json:"current"`
+	Total      int    `json:"total"`
+	Percent    int    `json:"percent"`
+	StartedAt  int64  `json:"started_at"`
+	FinishedAt int64  `json:"finished_at"`
+	Error      string `json:"error"`
+}
+
 // Engine 统筹三地资金流向采集调度（首次冷启动自动回填 + 日常盘中/盘后错峰调度）。
 type Engine struct {
 	Repo *Repo
@@ -14,15 +30,108 @@ type Engine struct {
 	US   *USCollector
 	HK   *HKCollector
 
-	syncMu sync.Mutex
+	syncMu   sync.Mutex
+	progMu   sync.RWMutex
+	progress map[string]*SyncProgress
 }
 
 func NewEngine(repo *Repo, tushareToken, secUA string) *Engine {
-	return &Engine{
-		Repo: repo,
-		CN:   NewCNCollector(repo, tushareToken),
-		US:   NewUSCollector(repo, secUA),
-		HK:   NewHKCollector(repo),
+	e := &Engine{
+		Repo:     repo,
+		CN:       NewCNCollector(repo, tushareToken),
+		US:       NewUSCollector(repo, secUA),
+		HK:       NewHKCollector(repo),
+		progress: make(map[string]*SyncProgress),
+	}
+	e.CN.onProgress = func(cur, total int, stage string) { e.updateProgress("cn_etf", cur, total, stage) }
+	e.US.onProgress = func(cur, total int, stage string) { e.updateProgress("us_13f", cur, total, stage) }
+	e.HK.onProgress = func(cur, total int, stage string) { e.updateProgress("hk_flow", cur, total, stage) }
+	return e
+}
+
+func (e *Engine) MarkSyncQueued(market string) {
+	markets := expandMarkets(market)
+	now := time.Now().Unix()
+	e.progMu.Lock()
+	for _, m := range markets {
+		e.progress[m] = &SyncProgress{
+			Market:    m,
+			Running:   true,
+			Stage:     "任务已排队，准备连接官方数据源...",
+			Percent:   2,
+			StartedAt: now,
+		}
+	}
+	e.progMu.Unlock()
+}
+
+func (e *Engine) updateProgress(market string, cur, total int, stage string) {
+	e.progMu.Lock()
+	p, ok := e.progress[market]
+	if !ok {
+		p = &SyncProgress{Market: market, StartedAt: time.Now().Unix()}
+		e.progress[market] = p
+	}
+	p.Running = true
+	p.Current = cur
+	p.Total = total
+	p.Stage = stage
+	if total > 0 {
+		pct := (cur * 100) / total
+		if pct < 5 {
+			pct = 5
+		}
+		if pct > 98 {
+			pct = 98
+		}
+		p.Percent = pct
+	}
+	e.progMu.Unlock()
+}
+
+func (e *Engine) finishProgress(market string, err error) {
+	e.progMu.Lock()
+	p, ok := e.progress[market]
+	if !ok {
+		p = &SyncProgress{Market: market}
+		e.progress[market] = p
+	}
+	p.Running = false
+	p.FinishedAt = time.Now().Unix()
+	if err != nil {
+		p.Error = err.Error()
+		p.Stage = "同步异常"
+	} else {
+		p.Error = ""
+		p.Percent = 100
+		if p.Total > 0 {
+			p.Current = p.Total
+		}
+		p.Stage = "同步完成"
+	}
+	e.progMu.Unlock()
+}
+
+func (e *Engine) SnapshotProgress() map[string]SyncProgress {
+	e.progMu.RLock()
+	defer e.progMu.RUnlock()
+	out := make(map[string]SyncProgress, len(e.progress))
+	for k, v := range e.progress {
+		out[k] = *v
+	}
+	return out
+}
+
+func expandMarkets(market string) []string {
+	switch market {
+	case "cn":
+		return []string{"cn_etf"}
+	case "us":
+		return []string{"us_13f"}
+	case "hk":
+		return []string{"hk_flow"}
+	default:
+		return []string{"cn_etf", "us_13f", "hk_flow"}
 	}
 }
 
@@ -98,20 +207,27 @@ func (e *Engine) TriggerSync(ctx context.Context, market string) error {
 	sctx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 	defer cancel()
 
+	runOne := func(m string, fn func() error) error {
+		e.updateProgress(m, 0, 100, "正在连接官方数据源...")
+		err := fn()
+		e.finishProgress(m, err)
+		return err
+	}
+
 	switch market {
 	case "cn":
 		log.Printf("[capital] syncing A-share National Team ETFs...")
-		return e.CN.SyncAll(sctx, false)
+		return runOne("cn_etf", func() error { return e.CN.SyncAll(sctx, false) })
 	case "us":
 		log.Printf("[capital] syncing US SEC 13F institutions...")
-		return e.US.SyncAll(sctx)
+		return runOne("us_13f", func() error { return e.US.SyncAll(sctx) })
 	case "hk":
 		log.Printf("[capital] syncing HKEX Southbound & CCASS...")
-		return e.HK.SyncAll(sctx)
+		return runOne("hk_flow", func() error { return e.HK.SyncAll(sctx) })
 	case "all":
-		_ = e.CN.SyncAll(sctx, false)
-		_ = e.US.SyncAll(sctx)
-		_ = e.HK.SyncAll(sctx)
+		_ = runOne("cn_etf", func() error { return e.CN.SyncAll(sctx, false) })
+		_ = runOne("us_13f", func() error { return e.US.SyncAll(sctx) })
+		_ = runOne("hk_flow", func() error { return e.HK.SyncAll(sctx) })
 		return nil
 	}
 	return nil

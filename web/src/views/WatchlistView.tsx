@@ -1,13 +1,14 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   CheckCircle2,
   Loader2,
   Plus,
   RefreshCw,
+  ShieldCheck,
   Trash2,
   XCircle,
 } from 'lucide-react';
-import { apiFetch, SyncStatus, WatchItem } from '../api';
+import { apiFetch, SyncProgress, SyncStatus, WatchItem } from '../api';
 
 interface Props {
   onSynced: () => void;
@@ -20,52 +21,103 @@ const MARKET_LABELS: Record<string, string> = {
 };
 
 const SYNC_NAMES: Record<string, string> = {
-  cn_etf: 'A股国家队 ETF（上交所/东财/腾讯双源）',
-  us_13f: '美股顶级机构 SEC 13F-HR（EDGAR 官方 XML）',
-  hk_flow: '港股南向 + CCASS 四大阵营（HKEX 官方）',
+  cn_etf: 'A股国家队 ETF',
+  us_13f: '美股顶级机构 SEC 13F-HR',
+  hk_flow: '港股南向 + CCASS 四大阵营',
 };
 
 export const WatchlistView: React.FC<Props> = ({ onSynced }) => {
   const [statuses, setStatuses] = useState<SyncStatus[]>([]);
+  const [progressMap, setProgressMap] = useState<Record<string, SyncProgress>>({});
+  const [tushareEnabled, setTushareEnabled] = useState(false);
   const [items, setItems] = useState<WatchItem[]>([]);
   const [market, setMarket] = useState<'cn_etf' | 'us_inst' | 'hk_stock'>('cn_etf');
   const [code, setCode] = useState('');
   const [name, setName] = useState('');
   const [category, setCategory] = useState('');
   const [exchange, setExchange] = useState('SH');
-  const [busySync, setBusySync] = useState('');
-  const [msg, setMsg] = useState('');
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  const [banner, setBanner] = useState<{ kind: 'info' | 'ok' | 'err'; text: string } | null>(null);
+  const prevRunningRef = useRef<Record<string, boolean>>({});
 
-  const loadAll = async () => {
-    const [ov, wl] = await Promise.all([
-      apiFetch<{ statuses: SyncStatus[] }>('/api/capital/overview'),
-      apiFetch<{ items: WatchItem[] }>('/api/capital/watchlist'),
-    ]);
-    setStatuses(ov.statuses ?? []);
+  const anyRunning = Object.values(progressMap).some((p) => p?.running);
+
+  const loadOverview = async () => {
+    const ov = await apiFetch<{
+      statuses: SyncStatus[];
+      progress?: Record<string, SyncProgress>;
+      tushare_enabled?: boolean;
+    }>('/api/capital/overview');
+    const nextStatuses = ov.statuses ?? [];
+    const nextProg = ov.progress ?? {};
+    setStatuses(nextStatuses);
+    setProgressMap(nextProg);
+    setTushareEnabled(Boolean(ov.tushare_enabled));
+
+    // 检测从运行中 -> 完成的状态跃迁，自动弹出明确的成功/失败回执并刷新看板
+    const finishedMsgs: string[] = [];
+    const errMsgs: string[] = [];
+    for (const mk of ['cn_etf', 'us_13f', 'hk_flow']) {
+      const wasRunning = Boolean(prevRunningRef.current[mk]);
+      const p = nextProg[mk];
+      const isRunning = Boolean(p?.running);
+      if (wasRunning && !isRunning && p) {
+        const elapsed =
+          p.finished_at && p.started_at ? Math.max(1, p.finished_at - p.started_at) : 0;
+        const st = nextStatuses.find((s) => s.market === mk);
+        if (p.error) {
+          errMsgs.push(`${SYNC_NAMES[mk]} 失败：${p.error}`);
+        } else {
+          finishedMsgs.push(
+            `${SYNC_NAMES[mk]} 同步成功（耗时 ${elapsed}s，更新 ${st?.item_count ?? 0} 条，数据截至 ${st?.data_as_of || '--'}）`
+          );
+        }
+      }
+      prevRunningRef.current[mk] = isRunning;
+    }
+    if (errMsgs.length > 0) {
+      setBanner({ kind: 'err', text: errMsgs.join('；') });
+    } else if (finishedMsgs.length > 0) {
+      setBanner({ kind: 'ok', text: finishedMsgs.join('；') });
+      onSynced();
+    }
+  };
+
+  const loadWatchlist = async () => {
+    const wl = await apiFetch<{ items: WatchItem[] }>('/api/capital/watchlist');
     setItems(wl.items ?? []);
   };
 
   useEffect(() => {
-    loadAll().catch(() => {});
+    Promise.all([loadOverview(), loadWatchlist()]).catch(() => {});
   }, []);
 
+  // 有后台任务运行时，每 1.2 秒实时轮询进度条与耗时，结束后自动停止轮询
+  useEffect(() => {
+    if (!anyRunning) return;
+    const poll = setInterval(() => {
+      setNowSec(Math.floor(Date.now() / 1000));
+      loadOverview().catch(() => {});
+    }, 1200);
+    return () => clearInterval(poll);
+  }, [anyRunning]);
+
   const triggerSync = async (target: string) => {
-    setBusySync(target);
-    setMsg('');
+    setBanner({ kind: 'info', text: '已启动同步任务，正在实时回传进度...' });
     try {
-      await apiFetch('/api/capital/sync', {
+      const res = await apiFetch<{ progress?: Record<string, SyncProgress> }>('/api/capital/sync', {
         method: 'POST',
         body: JSON.stringify({ market: target }),
       });
-      setMsg(`已触发后台同步任务（${target}），数据将在数秒至数十秒内写入本地库。`);
-      setTimeout(() => {
-        loadAll().catch(() => {});
-        onSynced();
-      }, 3000);
+      if (res.progress) {
+        for (const [k, v] of Object.entries(res.progress)) {
+          if (v?.running) prevRunningRef.current[k] = true;
+        }
+        setProgressMap(res.progress);
+      }
+      setNowSec(Math.floor(Date.now() / 1000));
     } catch (e: any) {
-      setMsg(`触发失败：${e.message}`);
-    } finally {
-      setBusySync('');
+      setBanner({ kind: 'err', text: `触发失败：${e.message}` });
     }
   };
 
@@ -87,11 +139,11 @@ export const WatchlistView: React.FC<Props> = ({ onSynced }) => {
       setCode('');
       setName('');
       setCategory('');
-      setMsg('已添加至监控池，点击上方同步即可抓取数据。');
-      await loadAll();
+      setBanner({ kind: 'ok', text: '已加入监控池，点击上方「单独刷新此市场」即可实时拉取。' });
+      await loadWatchlist();
       onSynced();
     } catch (err: any) {
-      setMsg(`添加失败：${err.message}`);
+      setBanner({ kind: 'err', text: `添加失败：${err.message}` });
     }
   };
 
@@ -100,10 +152,10 @@ export const WatchlistView: React.FC<Props> = ({ onSynced }) => {
       await apiFetch(`/api/capital/watchlist/${item.market}/${encodeURIComponent(item.code)}`, {
         method: 'DELETE',
       });
-      await loadAll();
+      await loadWatchlist();
       onSynced();
     } catch (err: any) {
-      setMsg(`删除失败：${err.message}`);
+      setBanner({ kind: 'err', text: `删除失败：${err.message}` });
     }
   };
 
@@ -111,53 +163,112 @@ export const WatchlistView: React.FC<Props> = ({ onSynced }) => {
 
   return (
     <div className="space-y-5">
-      {/* 数据源同步健康状态 */}
-      <div className="p-4 sm:p-5 rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
+      {/* 数据源同步健康状态与实时进度条 */}
+      <div className="p-4 sm:p-5 rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] space-y-3.5">
+        <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div>
-            <h3 className="text-sm sm:text-base font-bold">三地官方数据源同步状态</h3>
-            <p className="text-xs text-slate-400">
-              后台自动按交易日历定时回填，所有展示均读取本地 SQLite 快照，毫秒级响应
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-sm sm:text-base font-bold">三地官方数据源同步状态</h3>
+              <span
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                  tushareEnabled
+                    ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300'
+                    : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'
+                }`}
+              >
+                <ShieldCheck className="w-3 h-3" />
+                {tushareEnabled ? 'Tushare Pro 三源核验已启用' : '免费官方直连模式'}
+              </span>
+            </div>
+            <p className="text-xs text-slate-400 mt-0.5">
+              支持手动一键触发并实时查看同步进度与完成状态，平时按交易日历自动巡检
             </p>
           </div>
           <button
             onClick={() => triggerSync('all')}
-            disabled={busySync !== ''}
+            disabled={anyRunning}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-medium bg-slate-900 text-white dark:bg-blue-600 hover:opacity-90 disabled:opacity-50"
           >
-            {busySync === 'all' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-            全市场立即同步
+            {anyRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            {anyRunning ? '同步进行中...' : '全市场立即同步'}
           </button>
         </div>
 
-        {msg && (
-          <div className="p-2.5 rounded-xl bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-200 text-xs">
-            {msg}
+        {banner && (
+          <div
+            className={`p-3 rounded-xl text-xs flex items-start gap-2 ${
+              banner.kind === 'ok'
+                ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-200 border border-emerald-200/70 dark:border-emerald-800/50'
+                : banner.kind === 'err'
+                ? 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-200 border border-rose-200/70 dark:border-rose-800/50'
+                : 'bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-200 border border-blue-200/70 dark:border-blue-800/50'
+            }`}
+          >
+            {banner.kind === 'ok' ? (
+              <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+            ) : banner.kind === 'err' ? (
+              <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            ) : (
+              <Loader2 className="w-4 h-4 shrink-0 mt-0.5 animate-spin" />
+            )}
+            <span className="leading-relaxed">{banner.text}</span>
           </div>
         )}
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           {(['cn_etf', 'us_13f', 'hk_flow'] as const).map((mk) => {
             const st = statuses.find((s) => s.market === mk);
+            const prog = progressMap[mk];
+            const running = Boolean(prog?.running);
             const ok = st?.status === 'ok';
-            const running = st?.status === 'running';
             const syncKey = mk === 'cn_etf' ? 'cn' : mk === 'us_13f' ? 'us' : 'hk';
+            const elapsed = running && prog?.started_at ? Math.max(0, nowSec - prog.started_at) : 0;
+
             return (
               <div
                 key={mk}
-                className="p-3.5 rounded-xl bg-slate-50/80 dark:bg-slate-900/40 border border-[var(--border-subtle)] flex flex-col justify-between gap-2.5"
+                className="p-3.5 rounded-xl bg-slate-50/80 dark:bg-slate-900/40 border border-[var(--border-subtle)] flex flex-col justify-between gap-3"
               >
                 <div>
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-semibold">{SYNC_NAMES[mk]}</span>
                     {running ? (
-                      <Loader2 className="w-4 h-4 text-blue-500 animate-spin shrink-0" />
+                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-blue-600 dark:text-blue-400">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        {prog?.percent ?? 0}%
+                      </span>
                     ) : ok ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        正常
+                      </span>
                     ) : (
                       <XCircle className="w-4 h-4 text-amber-500 shrink-0" />
                     )}
                   </div>
+
+                  {/* 实时进度条（运行中或刚完成时可见） */}
+                  {running && prog && (
+                    <div className="mt-2.5 space-y-1.5">
+                      <div className="w-full h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-blue-600 dark:bg-blue-500 transition-all duration-300"
+                          style={{ width: `${Math.max(4, prog.percent)}%` }}
+                        />
+                      </div>
+                      <div className="flex items-center justify-between gap-2 text-[11px] text-blue-700 dark:text-blue-300">
+                        <span className="truncate">{prog.stage}</span>
+                        <span className="tabular-nums shrink-0">{elapsed}s</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {!running && prog && prog.finished_at > 0 && !prog.error && (
+                    <div className="mt-2 text-[11px] text-emerald-600 dark:text-emerald-400 font-medium">
+                      ✓ 本次同步完成（耗时 {Math.max(1, prog.finished_at - prog.started_at)}s）
+                    </div>
+                  )}
+
                   <div className="mt-2 space-y-1 text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
                     <div>数据截至：{st?.data_as_of || '尚未同步'}</div>
                     <div>已入库标的：{st?.item_count ?? 0} 条</div>
@@ -165,15 +276,18 @@ export const WatchlistView: React.FC<Props> = ({ onSynced }) => {
                       上次更新：
                       {st?.last_sync_at ? new Date(st.last_sync_at * 1000).toLocaleString('zh-CN') : '--'}
                     </div>
-                    {st?.error_msg && <div className="text-rose-500 break-all">告警：{st.error_msg}</div>}
+                    {st?.source_label && <div className="truncate" title={st.source_label}>数据源：{st.source_label}</div>}
+                    {(prog?.error || st?.error_msg) && (
+                      <div className="text-rose-500 break-all">告警：{prog?.error || st?.error_msg}</div>
+                    )}
                   </div>
                 </div>
                 <button
                   onClick={() => triggerSync(syncKey)}
-                  disabled={busySync !== ''}
-                  className="w-full py-1.5 rounded-lg text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-card)] hover:border-blue-400 transition-colors"
+                  disabled={anyRunning}
+                  className="w-full py-1.5 rounded-lg text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-card)] hover:border-blue-400 disabled:opacity-50 transition-colors"
                 >
-                  单独刷新此市场
+                  {running ? '同步中...' : '单独刷新此市场'}
                 </button>
               </div>
             );

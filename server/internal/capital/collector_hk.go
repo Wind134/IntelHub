@@ -19,8 +19,15 @@ import (
 
 // HKCollector 对接港交所披露易官方南向港股通 + CCASS 四大席位阵营（含富途 B01955 / 盈透 B01590）。
 type HKCollector struct {
-	repo *Repo
-	http *http.Client
+	repo       *Repo
+	http       *http.Client
+	onProgress ProgressFunc
+}
+
+func (c *HKCollector) report(cur, total int, stage string) {
+	if c.onProgress != nil {
+		c.onProgress(cur, total, stage)
+	}
 }
 
 func NewHKCollector(repo *Repo) *HKCollector {
@@ -233,6 +240,7 @@ func (c *HKCollector) SyncAll(ctx context.Context) error {
 	count := c.persistSouthboundSnapshot(ctx, settleDate, items, sbURL)
 
 	// 2. 同步核心关注港股的 CCASS 四大阵营（含富途 B01955 / 盈透 B01590），复用表单状态并跳过已同步标的
+	c.report(25, 100, fmt.Sprintf("南向持股已入库(%d只)，准备抓取 CCASS 席位...", count))
 	watches, _ := c.repo.ListWatchlist(ctx, "hk_stock")
 	quotes := c.fetchHKQuotes(ctx, watchCodes(watches))
 	const ccURL = "https://www3.hkexnews.hk/sdw/search/searchsdw_c.aspx"
@@ -246,6 +254,7 @@ func (c *HKCollector) SyncAll(ctx context.Context) error {
 				break
 			}
 			code := padHKCode(watches[i].Code)
+			c.report(30+((i+1)*68)/maxInt(1, len(watches)), 100, fmt.Sprintf("抓取 CCASS %s %s (%d/%d)", code, watches[i].Name, i+1, len(watches)))
 			if _, snaps, _, err := c.repo.GetHKStockDetail(ctx, code); err == nil && len(snaps) > 0 && snaps[0].SettlementDate == settleDate {
 				continue
 			}

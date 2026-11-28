@@ -309,7 +309,9 @@ func (s *WebServer) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"statuses": statuses,
+		"statuses":        statuses,
+		"progress":        s.engine.SnapshotProgress(),
+		"tushare_enabled": s.engine.CN.ts.Enabled(),
 		"kpi": map[string]any{
 			"cn_gov_total_rmb_yi": cnGovTotalYi,
 			"cn_flow_1d_rmb_yi":   cnFlow1DYi,
@@ -465,10 +467,15 @@ func (s *WebServer) handleTriggerSync(w http.ResponseWriter, r *http.Request) {
 	if req.Market == "" {
 		req.Market = "all"
 	}
+	s.engine.MarkSyncQueued(req.Market)
 	go func(m string) {
 		_ = s.engine.TriggerSync(context.Background(), m)
 	}(req.Market)
-	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "started": req.Market})
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"ok":       true,
+		"started":  req.Market,
+		"progress": s.engine.SnapshotProgress(),
+	})
 }
 
 func setSessionCookie(w http.ResponseWriter, r *http.Request, tok string, expUnix int64) {

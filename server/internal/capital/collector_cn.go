@@ -20,9 +20,16 @@ var shanghaiTZ = time.FixedZone("Asia/Shanghai", 8*3600)
 
 // CNCollector 负责 A 股国家队核心 ETF 的双源/三源份额校验、历史回填与两阶段放量监控。
 type CNCollector struct {
-	repo *Repo
-	ts   *TushareClient
-	http *http.Client
+	repo       *Repo
+	ts         *TushareClient
+	http       *http.Client
+	onProgress ProgressFunc
+}
+
+func (c *CNCollector) report(cur, total int, stage string) {
+	if c.onProgress != nil {
+		c.onProgress(cur, total, stage)
+	}
 }
 
 func NewCNCollector(repo *Repo, tushareToken string) *CNCollector {
@@ -117,6 +124,7 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 	}
 
 	// 1. 批量拉取东财精确总份额 f38 + 实时价 f2 + 成交额 f6
+	c.report(5, 100, "拉取东财/腾讯/上交所实时份额与净值...")
 	emMap, err := c.fetchEastmoneyQuotes(ctx, watches)
 	if err != nil {
 		c.repo.SetSyncStatus(ctx, SyncStatus{Market: "cn_etf", Status: "error", ErrorMsg: err.Error(), SourceLabel: "SSE/东财/腾讯双源"})
@@ -261,13 +269,17 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 		if err := c.repo.UpsertCNETFDailyBatch(ctx, []CNETFDaily{row}); err == nil {
 			synced++
 		}
+		c.report(10+(synced*30)/maxInt(1, len(watches)), 100, fmt.Sprintf("核验当日份额 %s (%d/%d)", w.Code, synced, len(watches)))
 	}
 
 	if !intradayOnly {
+		c.report(42, 100, "检查上交所历史每日份额...")
 		c.backfillSSEHistoricalShares(ctx, watches, "2026-11-01")
 		if c.ts.Enabled() {
+			c.report(55, 100, "Tushare Pro fund_share 回填深市与三源校验...")
 			c.backfillTushareHistoricalShares(ctx, watches, "2026-11-01")
 		}
+		c.report(85, 100, "更新最新定期报告机构持仓占比...")
 		c.syncInstitutionalHolders(ctx, watches)
 	}
 
@@ -658,10 +670,11 @@ func (c *CNCollector) backfillTushareHistoricalShares(ctx context.Context, watch
 	}
 
 	log.Printf("[capital:cn] backfilling ETF daily shares via Tushare Pro fund_share since %s...", sinceDate)
-	for _, w := range watches {
+	for idx, w := range watches {
 		if ctx.Err() != nil {
 			return
 		}
+		c.report(55+(idx*30)/maxInt(1, len(watches)), 100, fmt.Sprintf("Tushare fund_share %s (%d/%d)", toTSCode(w.Code, w.Exchange), idx+1, len(watches)))
 		series, err := c.repo.GetCNETFSeries(ctx, w.Code, 65)
 		if err != nil || len(series) < 2 {
 			continue
@@ -792,10 +805,11 @@ var reCyrjgRow = regexp.MustCompile(`<tr><td>(\d{4}-\d{2}-\d{2})</td><td[^>]*>([
 
 // syncInstitutionalHolders 抓取每只 ETF 最新官方定期报告（中报/年报）的机构持仓结构，替代静态硬编码数据。
 func (c *CNCollector) syncInstitutionalHolders(ctx context.Context, watches []WatchItem) {
-	for _, w := range watches {
+	for idx, w := range watches {
 		if ctx.Err() != nil {
 			return
 		}
+		c.report(85+(idx*14)/maxInt(1, len(watches)), 100, fmt.Sprintf("同步机构占比 %s (%d/%d)", w.Code, idx+1, len(watches)))
 		u := fmt.Sprintf("https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=cyrjg&code=%s", w.Code)
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		req.Header.Set("Referer", "https://fundf10.eastmoney.com/")

@@ -8,6 +8,18 @@ export interface SyncStatus {
   source_label: string;
 }
 
+export interface SyncProgress {
+  market: string;
+  running: boolean;
+  stage: string;
+  current: number;
+  total: number;
+  percent: number;
+  started_at: number;
+  finished_at: number;
+  error: string;
+}
+
 export interface WatchItem {
   id: number;
   market: 'cn_etf' | 'us_inst' | 'hk_stock';

@@ -18,13 +18,20 @@ import (
 
 // USCollector 直连美国证监会 SEC EDGAR 官方 API (data.sec.gov)，解析 13F-HR 原始 XML。
 type USCollector struct {
-	repo      *Repo
-	userAgent string
-	http      *http.Client
+	repo       *Repo
+	userAgent  string
+	http       *http.Client
+	onProgress ProgressFunc
 
 	mu          sync.Mutex
 	lastReq     time.Time
 	name2Ticker map[string]string
+}
+
+func (c *USCollector) report(cur, total int, stage string) {
+	if c.onProgress != nil {
+		c.onProgress(cur, total, stage)
+	}
 }
 
 func NewUSCollector(repo *Repo, userAgent string) *USCollector {
@@ -315,14 +322,16 @@ func (c *USCollector) SyncAll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	c.report(5, 100, "加载 SEC 证券代码映射表...")
 	c.ensureTickerMap(ctx)
 
 	synced := 0
 	latestReport := ""
-	for _, w := range watches {
+	for idx, w := range watches {
 		if ctx.Err() != nil {
 			break
 		}
+		c.report(10+((idx+1)*88)/maxInt(1, len(watches)), 100, fmt.Sprintf("解析 SEC 13F %s (%d/%d)", w.Name, idx+1, len(watches)))
 		repDate, err := c.syncOneInstitution(ctx, w)
 		if err != nil {
 			log.Printf("[capital:us] sync %s (%s) warn: %v", w.Code, w.Name, err)
