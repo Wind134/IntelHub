@@ -331,7 +331,12 @@ func (s *WebServer) handleCNETFs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"currency": "RMB", "items": items})
+	trend, _ := s.engine.Repo.GetCNFlowTrend(r.Context(), 90)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"currency": "RMB",
+		"items":    items,
+		"trend":    trend,
+	})
 }
 
 func (s *WebServer) handleCNETFDetail(w http.ResponseWriter, r *http.Request) {

@@ -637,6 +637,63 @@ func (r *Repo) ListCNETFSummaries(ctx context.Context) ([]CNETFSummary, error) {
 	return out, nil
 }
 
+// GetCNFlowTrend 汇总监控池与国家队核心宽基的逐日净申赎及累计净申购趋势序列（仅包含已落库官方份额的交易日）。
+func (r *Repo) GetCNFlowTrend(ctx context.Context, limit int) ([]CNFlowTrendPoint, error) {
+	if limit <= 0 {
+		limit = 90
+	}
+	rows, err := r.st.ReadDB().QueryContext(ctx, `
+		SELECT d.trade_date, w.category, d.net_flow_rmb
+		FROM cap_cn_etf_daily d
+		JOIN cap_watchlist w ON w.market = 'cn_etf' AND w.code = d.code AND w.enabled = 1
+		WHERE d.is_intraday = 0
+		  AND d.trade_date >= '2026-11-01'
+		ORDER BY d.trade_date ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var dates []string
+	byDate := map[string]*CNFlowTrendPoint{}
+	for rows.Next() {
+		var dt, cat string
+		var flow float64
+		if err := rows.Scan(&dt, &cat, &flow); err != nil {
+			return nil, err
+		}
+		pt, ok := byDate[dt]
+		if !ok {
+			pt = &CNFlowTrendPoint{TradeDate: dt}
+			byDate[dt] = pt
+			dates = append(dates, dt)
+		}
+		pt.DailyFlowYi += flow
+		if IsCoreBroadIndexETF(cat) {
+			pt.CoreDailyFlowYi += flow
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(dates) > limit {
+		dates = dates[len(dates)-limit:]
+	}
+	out := make([]CNFlowTrendPoint, 0, len(dates))
+	cumAll := 0.0
+	cumCore := 0.0
+	for _, dt := range dates {
+		pt := byDate[dt]
+		cumAll += pt.DailyFlowYi
+		cumCore += pt.CoreDailyFlowYi
+		pt.CumulativeYi = cumAll
+		pt.CoreCumYi = cumCore
+		out = append(out, *pt)
+	}
+	return out, nil
+}
+
 func (r *Repo) SaveUS13FFiling(ctx context.Context, f US13FFiling, holdings []US13FHolding) error {
 	r.st.LockWrite()
 	defer r.st.UnlockWrite()

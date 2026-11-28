@@ -178,6 +178,14 @@ type HKBrokerPosition struct {
 	TransferFlag    string  `json:"transfer_flag"`
 }
 
+type CNFlowTrendPoint struct {
+	TradeDate       string  `json:"trade_date"`
+	DailyFlowYi     float64 `json:"daily_flow_yi"`
+	CumulativeYi    float64 `json:"cumulative_yi"`
+	CoreDailyFlowYi float64 `json:"core_daily_flow_yi"`
+	CoreCumYi       float64 `json:"core_cumulative_yi"`
+}
+
 type SyncStatus struct {
 	Market      string `json:"market"`
 	Status      string `json:"status"` // ok | running | error

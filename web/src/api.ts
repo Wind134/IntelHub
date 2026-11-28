@@ -68,6 +68,14 @@ export interface CNETFSummary {
   gov_holders?: CNETFHolder[];
 }
 
+export interface CNFlowTrendPoint {
+  trade_date: string;
+  daily_flow_yi: number;
+  cumulative_yi: number;
+  core_daily_flow_yi: number;
+  core_cumulative_yi: number;
+}
+
 export interface CNETFDaily {
   code: string;
   trade_date: string;

@@ -13,6 +13,7 @@ import {
   CNETFDaily,
   CNETFHolder,
   CNETFSummary,
+  CNFlowTrendPoint,
   flowColorClass,
   fmtRMBYi,
   fmtSharesCN,
@@ -110,6 +111,8 @@ function VerifyBadge({ status }: { status: string }) {
 
 export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
   const [items, setItems] = useState<CNETFSummary[]>([]);
+  const [trend, setTrend] = useState<CNFlowTrendPoint[]>([]);
+  const [trendScope, setTrendScope] = useState<'core' | 'all'>('core');
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
   const [win, setWin] = useState<WindowKey>('5d');
@@ -122,10 +125,11 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
   useEffect(() => {
     let active = true;
     setLoading(true);
-    apiFetch<{ currency: string; items: CNETFSummary[] }>('/api/capital/cn/etfs')
+    apiFetch<{ currency: string; items: CNETFSummary[]; trend?: CNFlowTrendPoint[] }>('/api/capital/cn/etfs')
       .then((res) => {
         if (!active) return;
         setItems(res.items ?? []);
+        setTrend(res.trend ?? []);
         setErr('');
       })
       .catch((e: Error) => {
@@ -232,17 +236,106 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
     };
   }, [filtered, win, dark]);
 
+  const trendChartOption = useMemo<EChartsOption>(() => {
+    const dates = trend.map((p) => p.trade_date.slice(5));
+    const daily = trend.map((p) =>
+      Number((trendScope === 'core' ? p.core_daily_flow_yi : p.daily_flow_yi).toFixed(2))
+    );
+    const cum = trend.map((p) =>
+      Number((trendScope === 'core' ? p.core_cumulative_yi : p.cumulative_yi).toFixed(2))
+    );
+    const textColor = dark ? '#cbd5e1' : '#334155';
+    const gridColor = dark ? '#1e293b' : '#e2e8f0';
+    return {
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'cross' },
+        formatter: (params: any) => {
+          const idx = params?.[0]?.dataIndex ?? 0;
+          const pt = trend[idx];
+          if (!pt) return '';
+          const dVal = trendScope === 'core' ? pt.core_daily_flow_yi : pt.daily_flow_yi;
+          const cVal = trendScope === 'core' ? pt.core_cumulative_yi : pt.cumulative_yi;
+          return `<div style="font-size:12px"><strong>${pt.trade_date}</strong><br/>当日净申赎：<b>${fmtRMBYi(dVal, true)}</b><br/>累计申购趋势：<b>${fmtRMBYi(cVal, true)}</b></div>`;
+        },
+      },
+      legend: {
+        data: ['当日净申赎(亿元)', '累计净申赎趋势(亿元)'],
+        textStyle: { color: textColor, fontSize: 11 },
+      },
+      grid: { left: 10, right: 10, top: 32, bottom: 14, containLabel: true },
+      xAxis: {
+        type: 'category',
+        data: dates,
+        axisLabel: { color: textColor, fontSize: 10 },
+        axisLine: { lineStyle: { color: gridColor } },
+      },
+      yAxis: [
+        {
+          type: 'value',
+          name: '当日(亿)',
+          nameTextStyle: { color: textColor, fontSize: 10 },
+          axisLabel: { color: textColor, fontSize: 10 },
+          splitLine: { lineStyle: { color: gridColor } },
+        },
+        {
+          type: 'value',
+          name: '累计(亿)',
+          nameTextStyle: { color: textColor, fontSize: 10 },
+          axisLabel: { color: textColor, fontSize: 10 },
+          splitLine: { show: false },
+        },
+      ],
+      series: [
+        {
+          name: '当日净申赎(亿元)',
+          type: 'bar',
+          barMaxWidth: 16,
+          data: daily.map((v) => ({
+            value: v,
+            itemStyle: {
+              color: v >= 0 ? 'rgba(225, 29, 72, 0.78)' : 'rgba(5, 150, 105, 0.78)',
+              borderRadius: v >= 0 ? [3, 3, 0, 0] : [0, 0, 3, 3],
+            },
+          })),
+        },
+        {
+          name: '累计净申赎趋势(亿元)',
+          type: 'line',
+          yAxisIndex: 1,
+          smooth: true,
+          symbol: 'circle',
+          symbolSize: 5,
+          lineStyle: { width: 2.5, color: '#2563eb' },
+          itemStyle: { color: '#2563eb' },
+          areaStyle: {
+            color: dark ? 'rgba(37, 99, 235, 0.16)' : 'rgba(37, 99, 235, 0.10)',
+          },
+          data: cum,
+        },
+      ],
+    };
+  }, [trend, trendScope, dark]);
+
   const detailChartOption = useMemo<EChartsOption>(() => {
     const sorted = [...detailSeries].sort((a, b) => a.trade_date.localeCompare(b.trade_date));
     const dates = sorted.map((d) => d.trade_date.slice(5));
     const flows = sorted.map((d) => Number(d.net_flow_rmb.toFixed(2)));
+    let running = 0;
+    const cumFlows = sorted.map((d) => {
+      running += d.net_flow_rmb;
+      return Number(running.toFixed(2));
+    });
     const navs = sorted.map((d) => Number((d.nav || d.close_price).toFixed(4)));
     const textColor = dark ? '#cbd5e1' : '#334155';
     const gridColor = dark ? '#1e293b' : '#e2e8f0';
     return {
       tooltip: { trigger: 'axis' },
-      legend: { data: ['日净申赎(亿元)', '单位净值(NAV)'], textStyle: { color: textColor, fontSize: 11 } },
-      grid: { left: 10, right: 10, top: 32, bottom: 16, containLabel: true },
+      legend: {
+        data: ['日净申赎(亿元)', '累计申购趋势(亿元)', '单位净值(NAV)'],
+        textStyle: { color: textColor, fontSize: 11 },
+      },
+      grid: { left: 10, right: 10, top: 34, bottom: 16, containLabel: true },
       xAxis: { type: 'category', data: dates, axisLabel: { color: textColor, fontSize: 10 } },
       yAxis: [
         {
@@ -269,12 +362,22 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
           })),
         },
         {
+          name: '累计申购趋势(亿元)',
+          type: 'line',
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { width: 2, color: '#f59e0b' },
+          itemStyle: { color: '#f59e0b' },
+          data: cumFlows,
+        },
+        {
           name: '单位净值(NAV)',
           type: 'line',
           yAxisIndex: 1,
           smooth: true,
           showSymbol: false,
           lineStyle: { width: 2, color: '#2563eb' },
+          itemStyle: { color: '#2563eb' },
           data: navs,
         },
       ],
@@ -383,7 +486,45 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
         </div>
       )}
 
-      {/* 图表：核心宽基 ETF 净申赎排行 */}
+      {/* 图表区：1) 累计净申赎趋势折线图 + 2) 核心宽基 ETF 净申赎排行 */}
+      {!loading && trend.length > 0 && (
+        <div className="p-4 rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)]">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <div>
+              <h3 className="text-sm font-semibold">
+                {trendScope === 'core' ? '国家队核心宽基' : '全监控池 ETF'} · 申购资金累计趋势（人民币亿元）
+              </h3>
+              <p className="text-[11px] text-slate-400">
+                蓝线追踪 11 月以来累计净申赎走势（右轴），红绿柱为每日净申赎脉冲（左轴），收盘日更三源核验
+              </p>
+            </div>
+            <div className="inline-flex p-0.5 rounded-xl bg-slate-200/70 dark:bg-slate-800/90">
+              <button
+                onClick={() => setTrendScope('core')}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all ${
+                  trendScope === 'core'
+                    ? 'bg-[var(--bg-card)] text-slate-900 dark:text-white shadow-xs'
+                    : 'text-slate-500 dark:text-slate-400'
+                }`}
+              >
+                国家队核心宽基
+              </button>
+              <button
+                onClick={() => setTrendScope('all')}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all ${
+                  trendScope === 'all'
+                    ? 'bg-[var(--bg-card)] text-slate-900 dark:text-white shadow-xs'
+                    : 'text-slate-500 dark:text-slate-400'
+                }`}
+              >
+                全部监控池
+              </button>
+            </div>
+          </div>
+          <EChartBox option={trendChartOption} dark={dark} height={260} />
+        </div>
+      )}
+
       {!loading && filtered.length > 0 && (
         <div className="p-4 rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)]">
           <div className="flex items-center justify-between mb-2">
