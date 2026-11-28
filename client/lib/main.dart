@@ -2556,74 +2556,77 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
         Card(
           child: Padding(
             padding: const EdgeInsets.all(18),
-            child: Row(
-              children: [
-                CircleAvatar(
-                  radius: 22,
-                  backgroundColor: cs.primary.withValues(alpha: 0.14),
-                  child: Icon(
-                    _isLegacyAuth ? Icons.vpn_key_rounded : Icons.verified_user_rounded,
-                    color: cs.primary,
+            child: _ResponsiveSettingRow(
+              leading: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  CircleAvatar(
+                    radius: 22,
+                    backgroundColor: cs.primary.withValues(alpha: 0.14),
+                    child: Icon(
+                      _isLegacyAuth ? Icons.vpn_key_rounded : Icons.verified_user_rounded,
+                      color: cs.primary,
+                    ),
                   ),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        _loggedInUser.isNotEmpty ? _loggedInUser : (_isLegacyAuth ? '传统 API Token 模式' : '已认证账号'),
-                        style: Theme.of(context).textTheme.titleSmall,
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        _isLegacyAuth
-                            ? '当前为旧版 Token 直连；退出后可切换为账号密码加密登录'
-                            : '个人偏好已绑定账号并以 AES-256-GCM 加密云端同步 · 凭据受 ${Platform.isAndroid ? "Android Keystore" : "Windows DPAPI"} 保护',
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ],
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _loggedInUser.isNotEmpty ? _loggedInUser : (_isLegacyAuth ? '传统 API Token 模式' : '已认证账号'),
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          _isLegacyAuth
+                              ? '当前为旧版 Token 直连；退出后可切换为账号密码加密登录'
+                              : '个人偏好已绑定账号并以 AES-256-GCM 加密云端同步 · 凭据受 ${Platform.isAndroid ? "Android Keystore" : "Windows DPAPI"} 保护',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    if (!_isLegacyAuth) ...[
-                      OutlinedButton.icon(
-                        onPressed: _syncingCloudPrefs ? null : () async {
-                          await _pushCloudPreferences();
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('已将当前配置 AES-256-GCM 加密同步到云端账号')),
-                            );
-                          }
-                        },
-                        icon: _syncingCloudPrefs
-                            ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
-                            : const Icon(Icons.cloud_sync_rounded, size: 17),
-                        label: const Text('立即同步'),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: _openChangePasswordDialog,
-                        icon: const Icon(Icons.password_rounded, size: 17),
-                        label: const Text('改密'),
-                      ),
-                    ],
+                ],
+              ),
+              trailing: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  if (!_isLegacyAuth) ...[
                     OutlinedButton.icon(
-                      onPressed: () => _handleLogout(remote: true, message: '已安全退出登录'),
-                      icon: Icon(Icons.logout_rounded, size: 17, color: cs.error),
-                      label: Text('退出登录', style: TextStyle(color: cs.error)),
+                      onPressed: _syncingCloudPrefs ? null : () async {
+                        await _pushCloudPreferences();
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('已将当前配置 AES-256-GCM 加密同步到云端账号')),
+                          );
+                        }
+                      },
+                      icon: _syncingCloudPrefs
+                          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.cloud_sync_rounded, size: 17),
+                      label: const Text('立即同步'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _openChangePasswordDialog,
+                      icon: const Icon(Icons.password_rounded, size: 17),
+                      label: const Text('改密'),
                     ),
                   ],
-                ),
-              ],
+                  OutlinedButton.icon(
+                    onPressed: () => _handleLogout(remote: true, message: '已安全退出登录'),
+                    icon: Icon(Icons.logout_rounded, size: 17, color: cs.error),
+                    label: Text('退出登录', style: TextStyle(color: cs.error)),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
         const SizedBox(height: 22),
 
-        // 1. Appearance & High-Refresh-Rate Motion (synced Windows & Android)
+        // 1. Appearance & High-Refresh-Rate Motion
         Text('外观与高帧率动效', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 10),
         Card(
@@ -2631,32 +2634,34 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
             padding: const EdgeInsets.all(18),
             child: Column(
               children: [
-                Row(
-                  children: [
-                    const Icon(Icons.palette_outlined),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('主题模式', style: Theme.of(context).textTheme.titleSmall),
-                          Text('支持跟随系统、日光浅色与星夜深色模式', style: Theme.of(context).textTheme.bodySmall),
-                        ],
+                _ResponsiveSettingRow(
+                  leading: Row(
+                    children: [
+                      const Icon(Icons.palette_outlined),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('主题模式', style: Theme.of(context).textTheme.titleSmall),
+                            Text('支持跟随系统、日光浅色与星夜深色模式', style: Theme.of(context).textTheme.bodySmall),
+                          ],
+                        ),
                       ),
-                    ),
-                    SegmentedButton<ThemeMode>(
-                      segments: const [
-                        ButtonSegment(value: ThemeMode.system, label: Text('系统')),
-                        ButtonSegment(value: ThemeMode.light, label: Text('浅色')),
-                        ButtonSegment(value: ThemeMode.dark, label: Text('深色')),
-                      ],
-                      selected: {widget.themeMode},
-                      onSelectionChanged: (s) {
-                        widget.onThemeModeChanged(s.first);
-                        _pushCloudPreferences();
-                      },
-                    ),
-                  ],
+                    ],
+                  ),
+                  trailing: SegmentedButton<ThemeMode>(
+                    segments: const [
+                      ButtonSegment(value: ThemeMode.system, label: Text('系统')),
+                      ButtonSegment(value: ThemeMode.light, label: Text('浅色')),
+                      ButtonSegment(value: ThemeMode.dark, label: Text('深色')),
+                    ],
+                    selected: {widget.themeMode},
+                    onSelectionChanged: (s) {
+                      widget.onThemeModeChanged(s.first);
+                      _pushCloudPreferences();
+                    },
+                  ),
                 ),
                 const Divider(height: 24),
                 SwitchListTile(
@@ -2705,8 +2710,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
         // 2. Global Server Notification Level & Category Policy
         Row(
           children: [
-            Text('全局消息通知级别与领域（同步服务端）', style: Theme.of(context).textTheme.titleLarge),
-            const Spacer(),
+            Expanded(child: Text('全局消息通知级别与领域（同步服务端）', style: Theme.of(context).textTheme.titleLarge)),
             IconButton(tooltip: '刷新服务端通知策略', onPressed: _loadNotificationPolicy, icon: const Icon(Icons.refresh_rounded, size: 18)),
           ],
         ),
@@ -2802,8 +2806,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
         // 3. Isolated 3-Slot LLM Model Service
         Row(
           children: [
-            Text('AI 模型服务配置（实时同步后端）', style: Theme.of(context).textTheme.titleLarge),
-            const Spacer(),
+            Expanded(child: Text('AI 模型服务配置（实时同步后端）', style: Theme.of(context).textTheme.titleLarge)),
             IconButton(tooltip: '重新拉取订阅模型列表', onPressed: _loadModelSettings, icon: const Icon(Icons.refresh_rounded, size: 18)),
           ],
         ),
@@ -2935,27 +2938,22 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                   value: _quietHoursEnabled,
                   onChanged: (v) => setState(() => _quietHoursEnabled = v),
                 ),
-                if (_quietHoursEnabled) ...[
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _quietCtrl,
-                          decoration: const InputDecoration(labelText: '免打扰时段 (HH:mm-HH:mm)', hintText: '00:30-07:30'),
-                        ),
+                if (_quietHoursEnabled)
+                  _ResponsiveSettingRow(
+                    leading: TextField(
+                      controller: _quietCtrl,
+                      decoration: const InputDecoration(labelText: '免打扰时段 (HH:mm-HH:mm)', hintText: '00:30-07:30'),
+                    ),
+                    trailing: SizedBox(
+                      width: 220,
+                      child: SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('9-10分特急突破免打扰', style: TextStyle(fontSize: 13)),
+                        value: _criticalBypassQuiet,
+                        onChanged: (v) => setState(() => _criticalBypassQuiet = v),
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: SwitchListTile(
-                          contentPadding: EdgeInsets.zero,
-                          title: const Text('9-10分特急突破免打扰', style: TextStyle(fontSize: 13)),
-                          value: _criticalBypassQuiet,
-                          onChanged: (v) => setState(() => _criticalBypassQuiet = v),
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
-                ],
                 if (Platform.isWindows)
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
@@ -3459,6 +3457,40 @@ class _ThreadBubble extends StatelessWidget {
       child: isUser
           ? SelectableText(msg.contentMd, style: Theme.of(context).textTheme.bodyMedium)
           : IntelMarkdownView(data: msg.contentMd),
+    );
+  }
+}
+
+/// 响应式设置项容器：宽屏左右并排，窄屏上下折行，防止手机端挤压文字。
+class _ResponsiveSettingRow extends StatelessWidget {
+  final Widget leading;
+  final Widget trailing;
+
+  const _ResponsiveSettingRow({required this.leading, required this.trailing});
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (_, constraints) {
+        if (constraints.maxWidth < 540) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              leading,
+              const SizedBox(height: 12),
+              trailing,
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(child: leading),
+            const SizedBox(width: 16),
+            trailing,
+          ],
+        );
+      },
     );
   }
 }
