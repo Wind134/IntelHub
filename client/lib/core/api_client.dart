@@ -276,10 +276,11 @@ class IntelApiClient {
     return NotificationPolicy.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
   }
 
-  Future<SystemOverview> fetchOverview() async {
-    final resp = await _http
-        .get(Uri.parse('$_cleanBase/api/v1/system/overview'), headers: _headers)
-        .timeout(const Duration(seconds: 10));
+  Future<SystemOverview> fetchOverview({bool refreshQuota = false}) async {
+    final uri = Uri.parse('$_cleanBase/api/v1/system/overview').replace(
+      queryParameters: refreshQuota ? const {'refresh_quota': '1'} : null,
+    );
+    final resp = await _http.get(uri, headers: _headers).timeout(const Duration(seconds: 12));
     if (resp.statusCode != 200) throw HttpException('HTTP ${resp.statusCode}');
     return SystemOverview.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
   }

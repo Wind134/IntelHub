@@ -124,16 +124,7 @@ func (t *TwitterAPICollector) pollOnce(ctx context.Context) {
 	}
 
 	var payload struct {
-		Tweets []struct {
-			ID        string `json:"id"`
-			URL       string `json:"url"`
-			Text      string `json:"text"`
-			CreatedAt string `json:"createdAt"`
-			Author    struct {
-				UserName string `json:"userName"`
-				Name     string `json:"name"`
-			} `json:"author"`
-		} `json:"tweets"`
+		Tweets []twitterTweet `json:"tweets"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 2*1024*1024)).Decode(&payload); err != nil {
 		_, _ = t.store.UpsertSourceError(ctx, "twitterapi_io", "twitter_api", err.Error())
@@ -154,28 +145,11 @@ func (t *TwitterAPICollector) pollOnce(ctx context.Context) {
 		if tw.ID > maxID || len(tw.ID) > len(maxID) {
 			maxID = tw.ID
 		}
-		pubTS := time.Now().Unix()
-		if parsed, err := time.Parse(time.RubyDate, tw.CreatedAt); err == nil {
-			pubTS = parsed.Unix()
-		} else if parsed, err := time.Parse(time.RFC3339, tw.CreatedAt); err == nil {
-			pubTS = parsed.Unix()
+		item, keep := buildTweetRawItem(tw, isFirstRun)
+		if !keep {
+			continue
 		}
-		link := tw.URL
-		if link == "" && tw.Author.UserName != "" {
-			link = fmt.Sprintf("https://x.com/%s/status/%s", tw.Author.UserName, tw.ID)
-		}
-		items = append(items, model.RawItem{
-			SourceName:       "x:@" + tw.Author.UserName,
-			SourceType:       "twitter_api",
-			ExternalID:       "x:" + tw.ID,
-			Title:            fmt.Sprintf("@%s: %s", tw.Author.UserName, firstLine(tw.Text, 100)),
-			Summary:          tw.Text,
-			URL:              link,
-			PublishedAt:      pubTS,
-			CategoryHint:     inferXCategory(tw.Author.UserName, tw.Text),
-			BypassRuleFilter: false,
-			IsBaseline:       isFirstRun,
-		})
+		items = append(items, item)
 	}
 
 	if len(items) > 0 {
@@ -200,6 +174,136 @@ func (t *TwitterAPICollector) buildQuery(sinceID string) string {
 		base += " since_id:" + sinceID
 	}
 	return base
+}
+
+type twitterAuthor struct {
+	UserName string `json:"userName"`
+	Name     string `json:"name"`
+}
+
+type twitterQuoted struct {
+	ID     string        `json:"id"`
+	Text   string        `json:"text"`
+	Author twitterAuthor `json:"author"`
+}
+
+type twitterTweet struct {
+	ID                string         `json:"id"`
+	URL               string         `json:"url"`
+	Text              string         `json:"text"`
+	CreatedAt         string         `json:"createdAt"`
+	IsReply           bool           `json:"isReply"`
+	InReplyToID       string         `json:"inReplyToId"`
+	InReplyToUsername string         `json:"inReplyToUsername"`
+	Author            twitterAuthor  `json:"author"`
+	QuotedTweet       *twitterQuoted `json:"quoted_tweet"`
+}
+
+var lowSignalReplies = map[string]bool{
+	"yes": true, "yup": true, "yeah": true, "yep": true, "no": true, "nope": true,
+	"true": true, "indeed": true, "exactly": true, "wow": true, "cool": true,
+	"interesting": true, "agreed": true, "correct": true, "thanks": true, "thank you": true,
+	"100%": true, "haha": true, "lol": true, "lmao": true, "nice": true, "great": true,
+	"good point": true, "makes sense": true, "fair point": true, "looking into it": true,
+	"working on it": true, "coming soon": true, "for sure": true, "definitely": true,
+}
+
+func stripTweetNoise(s string) string {
+	fields := strings.Fields(s)
+	var kept []string
+	for _, f := range fields {
+		lf := strings.ToLower(f)
+		if strings.HasPrefix(lf, "http://") || strings.HasPrefix(lf, "https://") || strings.HasPrefix(f, "@") {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return strings.TrimSpace(strings.Join(kept, " "))
+}
+
+func countMeaningfulRunes(s string) int {
+	n := 0
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r >= 0x4E00 {
+			n++
+		}
+	}
+	return n
+}
+
+// buildTweetRawItem 过滤无上下文的碎片回复/表情水推，并为引用推文强制补齐原推上下文背景。
+func buildTweetRawItem(tw twitterTweet, isFirstRun bool) (model.RawItem, bool) {
+	cleanSelf := stripTweetNoise(tw.Text)
+	selfKey := strings.ToLower(strings.Trim(cleanSelf, " .!?,:;\"'"))
+	selfLen := countMeaningfulRunes(cleanSelf)
+
+	quotedText := ""
+	quotedUser := ""
+	if tw.QuotedTweet != nil {
+		quotedText = stripTweetNoise(tw.QuotedTweet.Text)
+		quotedUser = strings.TrimSpace(tw.QuotedTweet.Author.UserName)
+	}
+	quotedLen := countMeaningfulRunes(quotedText)
+
+	// 1. 严格丢弃无上下文的纯回复碎片（如仅回复 Yes/Yup/表情 或未携带原推背景的短回复）
+	if tw.IsReply && quotedLen < 25 {
+		if selfLen < 60 || lowSignalReplies[selfKey] {
+			return model.RawItem{}, false
+		}
+	}
+
+	// 2. 丢弃无引用原推时的纯表情、单词表态或缺乏背景的极短水推（如 "❤️", "Yes", "It is very useful"）
+	if quotedLen == 0 {
+		if selfLen < 32 || lowSignalReplies[selfKey] {
+			return model.RawItem{}, false
+		}
+	} else {
+		// 有引用原推时，若原推本身也极短且作者仅发表情/敷衍词，同样丢弃
+		if quotedLen < 35 && (selfLen < 12 || lowSignalReplies[selfKey]) {
+			return model.RawItem{}, false
+		}
+	}
+
+	pubTS := time.Now().Unix()
+	if parsed, err := time.Parse(time.RubyDate, tw.CreatedAt); err == nil {
+		pubTS = parsed.Unix()
+	} else if parsed, err := time.Parse(time.RFC3339, tw.CreatedAt); err == nil {
+		pubTS = parsed.Unix()
+	}
+	link := tw.URL
+	if link == "" && tw.Author.UserName != "" {
+		link = fmt.Sprintf("https://x.com/%s/status/%s", tw.Author.UserName, tw.ID)
+	}
+
+	title := fmt.Sprintf("@%s: %s", tw.Author.UserName, firstLine(cleanSelf, 100))
+	summary := strings.TrimSpace(tw.Text)
+	if quotedLen > 0 {
+		qLabel := "原推"
+		if quotedUser != "" {
+			qLabel = "@" + quotedUser
+		}
+		if selfLen < 20 || lowSignalReplies[selfKey] {
+			title = fmt.Sprintf("@%s 转发评论 %s: %s", tw.Author.UserName, qLabel, firstLine(quotedText, 84))
+		} else {
+			title = fmt.Sprintf("@%s 评 %s: %s", tw.Author.UserName, qLabel, firstLine(cleanSelf, 84))
+		}
+		summary = fmt.Sprintf("【原推上下文 · %s】%s\n\n【@%s 回复/评论】%s", qLabel, quotedText, tw.Author.UserName, strings.TrimSpace(tw.Text))
+	} else if tw.IsReply && tw.InReplyToUsername != "" {
+		summary = fmt.Sprintf("【回复 @%s】%s", tw.InReplyToUsername, strings.TrimSpace(tw.Text))
+	}
+
+	return model.RawItem{
+		SourceName:       "x:@" + tw.Author.UserName,
+		SourceType:       "twitter_api",
+		ExternalID:       "x:" + tw.ID,
+		Title:            title,
+		Summary:          summary,
+		URL:              link,
+		PublishedAt:      pubTS,
+		CategoryHint:     inferXCategory(tw.Author.UserName, title+" "+summary),
+		BypassRuleFilter: false,
+		IsBaseline:       isFirstRun,
+	}, true
 }
 
 func firstLine(s string, maxRunes int) string {

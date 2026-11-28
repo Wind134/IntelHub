@@ -10,10 +10,12 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'core/ai_usage_card.dart';
 import 'core/api_client.dart';
 import 'core/app_theme.dart';
 import 'core/auth_screen.dart';
 import 'core/fluid_motion.dart';
+import 'core/follow_up_suggestions.dart';
 import 'core/markdown_view.dart';
 import 'core/models.dart';
 import 'core/summary_reader.dart';
@@ -234,6 +236,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
   String _fallbackModel = 'qwen3.8-flash';
   String _strongModel = 'deepseek-v4-pro';
   bool _savingModels = false;
+  bool _refreshingOverview = false;
 
   // Settings controllers
   final TextEditingController _urlCtrl = TextEditingController();
@@ -1312,11 +1315,16 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     }
   }
 
-  Future<void> _loadOverview() async {
+  Future<void> _loadOverview({bool refreshQuota = false}) async {
+    if (_refreshingOverview) return;
+    if (refreshQuota && mounted) setState(() => _refreshingOverview = true);
     try {
-      final ov = await _api.fetchOverview();
+      final ov = await _api.fetchOverview(refreshQuota: refreshQuota);
       if (mounted) setState(() => _overview = ov);
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      if (refreshQuota && mounted) setState(() => _refreshingOverview = false);
+    }
   }
 
   Future<void> _loadModelSettings() async {
@@ -1353,6 +1361,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('已热同步至后端：初筛 $_fastModel · 兜底 $_fallbackModel · 深度 $_strongModel')),
       );
+      _loadOverview();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('保存模型配置失败：$e')));
@@ -1843,8 +1852,9 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
           ),
         ),
         Expanded(
-          child: IndexedStack(
+          child: FluidIndexedStack(
             index: _navIndex,
+            axis: Axis.vertical,
             children: [
               Row(
                 children: [
@@ -1877,14 +1887,28 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
             padding: const EdgeInsets.fromLTRB(18, 10, 12, 4),
             child: Row(
               children: [
-                Text(
-                  switch (_navIndex) {
-                    0 => '实时突发',
-                    1 => '历史情报库',
-                    2 => '每日内参',
-                    _ => '系统与模型',
+                AnimatedSwitcher(
+                  duration: Duration(milliseconds: widget.highFpsMotion ? 220 : 0),
+                  transitionBuilder: (child, anim) {
+                    final curved = CurvedAnimation(parent: anim, curve: Curves.easeOutCubic);
+                    return FadeTransition(
+                      opacity: curved,
+                      child: SlideTransition(
+                        position: Tween<Offset>(begin: const Offset(0, 0.18), end: Offset.zero).animate(curved),
+                        child: child,
+                      ),
+                    );
                   },
-                  style: Theme.of(context).textTheme.headlineSmall,
+                  child: Text(
+                    switch (_navIndex) {
+                      0 => '实时突发',
+                      1 => '历史情报库',
+                      2 => '每日内参',
+                      _ => '系统与模型',
+                    },
+                    key: ValueKey(_navIndex),
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
                 ),
                 const SizedBox(width: 8),
                 Container(
@@ -1905,8 +1929,9 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
             ),
           ),
           Expanded(
-            child: IndexedStack(
+            child: FluidIndexedStack(
               index: _navIndex,
+              axis: Axis.horizontal,
               children: [
                 _buildEventListPane(isArchiveMode: false, openDetailAsPage: true, showHeaderTitle: false),
                 _buildEventListPane(isArchiveMode: true, openDetailAsPage: true, showHeaderTitle: false),
@@ -2302,11 +2327,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                 spacing: 8,
                 runSpacing: 8,
                 children: [
-                  for (final preset in const [
-                    '分析对相关美股标的与产业链的影响',
-                    '核查背景脉络与历史同类事件演变',
-                    '总结核心风险点与后续关注信号',
-                  ])
+                  for (final preset in buildSmartFollowUpPrompts(ev))
                     _CompactPill(label: preset, selected: false, onTap: () => _askEventAI(preset)),
                 ],
               ),
@@ -2869,6 +2890,14 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
         ),
         const SizedBox(height: 22),
 
+        // 3.5 AI Subscription Quota & Token Ledger
+        AiUsageCard(
+          usage: ov?.llmUsage,
+          refreshing: _refreshingOverview,
+          onRefresh: () => _loadOverview(refreshQuota: true),
+        ),
+        const SizedBox(height: 22),
+
         // 4. Connection & Local Device Push Settings (Win11 Tray + Android KeepAlive + Quiet Hours)
         Text('服务端连接与本机通知引擎', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 10),
@@ -3242,34 +3271,56 @@ class _RailItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final dur = Duration(milliseconds: FluidMotionScope.of(context) ? 220 : 0);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       child: InkWell(
         borderRadius: BorderRadius.circular(14),
         onTap: onTap,
-        child: AnimatedContainer(
-          duration: Duration(milliseconds: FluidMotionScope.of(context) ? 180 : 0),
-          curve: Curves.easeOutCubic,
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          decoration: BoxDecoration(
-            color: selected ? cs.primary.withValues(alpha: 0.14) : Colors.transparent,
-            borderRadius: BorderRadius.circular(14),
-          ),
-          child: Column(
-            children: [
-              Icon(icon, size: 21, color: selected ? cs.primary : cs.onSurface.withValues(alpha: 0.65)),
-              const SizedBox(height: 4),
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 11.5,
-                  fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                  color: selected ? cs.primary : cs.onSurface.withValues(alpha: 0.65),
-                ),
+        child: Stack(
+          alignment: Alignment.centerLeft,
+          children: [
+            AnimatedContainer(
+              duration: dur,
+              curve: Curves.easeOutCubic,
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              decoration: BoxDecoration(
+                color: selected ? cs.primary.withValues(alpha: 0.14) : Colors.transparent,
+                borderRadius: BorderRadius.circular(14),
               ),
-            ],
-          ),
+              child: Column(
+                children: [
+                  AnimatedScale(
+                    scale: selected ? 1.08 : 1.0,
+                    duration: dur,
+                    curve: Curves.easeOutBack,
+                    child: Icon(icon, size: 21, color: selected ? cs.primary : cs.onSurface.withValues(alpha: 0.65)),
+                  ),
+                  const SizedBox(height: 4),
+                  AnimatedDefaultTextStyle(
+                    duration: dur,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                      color: selected ? cs.primary : cs.onSurface.withValues(alpha: 0.65),
+                    ),
+                    child: Text(label),
+                  ),
+                ],
+              ),
+            ),
+            AnimatedContainer(
+              duration: dur,
+              curve: Curves.easeOutCubic,
+              width: 3.5,
+              height: selected ? 24 : 0,
+              decoration: BoxDecoration(
+                color: cs.primary,
+                borderRadius: BorderRadius.circular(99),
+              ),
+            ),
+          ],
         ),
       ),
     );

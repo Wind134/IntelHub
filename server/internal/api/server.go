@@ -533,6 +533,13 @@ func (s *Server) handleSystemOverview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	forceQuota := r.URL.Query().Get("refresh_quota") == "1" || r.URL.Query().Get("refresh_quota") == "true"
+	if s.scorer != nil {
+		if ov.LLMUsage == nil {
+			ov.LLMUsage = &model.LLMUsageSummary{}
+		}
+		ov.LLMUsage.Quota = s.scorer.FetchSubscriptionQuota(r.Context(), forceQuota)
+	}
 	writeJSON(w, http.StatusOK, ov)
 }
 
@@ -602,7 +609,7 @@ func (s *Server) handleAskEvent(w http.ResponseWriter, r *http.Request) {
 
 	history, _ := s.store.GetEventThreads(r.Context(), ev.ID)
 
-	s.streamSSEWithPrep(w, r, func(emitStatus func(string)) (string, string, []model.EventThread, func(string, string)) {
+	s.streamSSEWithPrep(w, r, "ask_event", func(emitStatus func(string)) (string, string, []model.EventThread, func(string, string)) {
 		var searchNotes string
 		if req.WebSearch && s.enricher != nil && s.enricher.Enabled() {
 			emitStatus("正在联网检索最新信源…")
@@ -653,7 +660,7 @@ func (s *Server) handleAskHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.streamSSEWithPrep(w, r, func(emitStatus func(string)) (string, string, []model.EventThread, func(string, string)) {
+	s.streamSSEWithPrep(w, r, "ask_history", func(emitStatus func(string)) (string, string, []model.EventThread, func(string, string)) {
 		emitStatus("正在检索永久历史情报库…")
 		searchQ := strings.TrimSpace(req.Query)
 		if searchQ == "" {
@@ -693,6 +700,7 @@ func (s *Server) handleAskHistory(w http.ResponseWriter, r *http.Request) {
 func (s *Server) streamSSEWithPrep(
 	w http.ResponseWriter,
 	r *http.Request,
+	scene string,
 	prepare func(emitStatus func(string)) (sysPrompt, userPrompt string, history []model.EventThread, onDone func(full, modelUsed string)),
 ) {
 	flusher, ok := w.(http.Flusher)
@@ -746,7 +754,7 @@ func (s *Server) streamSSEWithPrep(
 		_ = writeData(map[string]string{"status": status})
 	})
 
-	full, modelUsed, err := s.scorer.StreamAsk(r.Context(), sysPrompt, userPrompt, history, func(delta string) error {
+	full, modelUsed, err := s.scorer.StreamAskWithScene(r.Context(), scene, sysPrompt, userPrompt, history, func(delta string) error {
 		return writeData(map[string]string{"delta": delta})
 	})
 	if err != nil {

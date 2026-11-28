@@ -249,6 +249,128 @@ class BudgetOverview {
       );
 }
 
+class LlmUsageBucket {
+  final String key;
+  final String label;
+  final int requestCount;
+  final int promptTokens;
+  final int completionTokens;
+  final int totalTokens;
+  final int estimatedCount;
+
+  const LlmUsageBucket({
+    required this.key,
+    required this.label,
+    required this.requestCount,
+    required this.promptTokens,
+    required this.completionTokens,
+    required this.totalTokens,
+    required this.estimatedCount,
+  });
+
+  factory LlmUsageBucket.fromJson(Map<String, dynamic> j) => LlmUsageBucket(
+        key: (j['key'] as String?) ?? '',
+        label: (j['label'] as String?) ?? (j['key'] as String?) ?? '',
+        requestCount: (j['request_count'] as num?)?.toInt() ?? 0,
+        promptTokens: (j['prompt_tokens'] as num?)?.toInt() ?? 0,
+        completionTokens: (j['completion_tokens'] as num?)?.toInt() ?? 0,
+        totalTokens: (j['total_tokens'] as num?)?.toInt() ?? 0,
+        estimatedCount: (j['estimated_count'] as num?)?.toInt() ?? 0,
+      );
+}
+
+class QuotaWindow {
+  final String status;
+  final double usedPercent;
+  final double remainingPercent;
+  final String resetsAt;
+
+  const QuotaWindow({
+    required this.status,
+    required this.usedPercent,
+    required this.remainingPercent,
+    required this.resetsAt,
+  });
+
+  factory QuotaWindow.fromJson(Map<String, dynamic> j) => QuotaWindow(
+        status: (j['status'] as String?) ?? 'ok',
+        usedPercent: (j['used_percent'] as num?)?.toDouble() ?? 0,
+        remainingPercent: (j['remaining_percent'] as num?)?.toDouble() ?? 100,
+        resetsAt: (j['resets_at'] as String?) ?? '',
+      );
+}
+
+class SubscriptionQuota {
+  final String provider;
+  final bool available;
+  final int fetchedAt;
+  final String error;
+  final QuotaWindow? rolling;
+  final QuotaWindow? weekly;
+  final QuotaWindow? monthly;
+
+  const SubscriptionQuota({
+    required this.provider,
+    required this.available,
+    required this.fetchedAt,
+    required this.error,
+    this.rolling,
+    this.weekly,
+    this.monthly,
+  });
+
+  factory SubscriptionQuota.fromJson(Map<String, dynamic> j) => SubscriptionQuota(
+        provider: (j['provider'] as String?) ?? 'opencode-go',
+        available: (j['available'] as bool?) ?? false,
+        fetchedAt: (j['fetched_at'] as num?)?.toInt() ?? 0,
+        error: (j['error'] as String?) ?? '',
+        rolling: j['rolling'] is Map<String, dynamic>
+            ? QuotaWindow.fromJson(j['rolling'] as Map<String, dynamic>)
+            : null,
+        weekly: j['weekly'] is Map<String, dynamic>
+            ? QuotaWindow.fromJson(j['weekly'] as Map<String, dynamic>)
+            : null,
+        monthly: j['monthly'] is Map<String, dynamic>
+            ? QuotaWindow.fromJson(j['monthly'] as Map<String, dynamic>)
+            : null,
+      );
+}
+
+class LlmUsageSummary {
+  final LlmUsageBucket today;
+  final LlmUsageBucket month;
+  final List<LlmUsageBucket> daily7d;
+  final List<LlmUsageBucket> byScene;
+  final List<LlmUsageBucket> byModel;
+  final SubscriptionQuota? quota;
+
+  const LlmUsageSummary({
+    required this.today,
+    required this.month,
+    required this.daily7d,
+    required this.byScene,
+    required this.byModel,
+    this.quota,
+  });
+
+  factory LlmUsageSummary.fromJson(Map<String, dynamic> j) => LlmUsageSummary(
+        today: LlmUsageBucket.fromJson((j['today'] as Map<String, dynamic>?) ?? const {}),
+        month: LlmUsageBucket.fromJson((j['month'] as Map<String, dynamic>?) ?? const {}),
+        daily7d: ((j['daily_7d'] as List?) ?? const [])
+            .map((e) => LlmUsageBucket.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        byScene: ((j['by_scene'] as List?) ?? const [])
+            .map((e) => LlmUsageBucket.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        byModel: ((j['by_model'] as List?) ?? const [])
+            .map((e) => LlmUsageBucket.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        quota: j['quota'] is Map<String, dynamic>
+            ? SubscriptionQuota.fromJson(j['quota'] as Map<String, dynamic>)
+            : null,
+      );
+}
+
 class SystemOverview {
   final int totalEvents;
   final int p1Events24h;
@@ -258,6 +380,7 @@ class SystemOverview {
   final int activeWsClients;
   final List<SourceHealth> sources;
   final BudgetOverview budget;
+  final LlmUsageSummary? llmUsage;
 
   const SystemOverview({
     required this.totalEvents,
@@ -268,6 +391,7 @@ class SystemOverview {
     required this.activeWsClients,
     required this.sources,
     required this.budget,
+    this.llmUsage,
   });
 
   factory SystemOverview.fromJson(Map<String, dynamic> j) => SystemOverview(
@@ -281,6 +405,9 @@ class SystemOverview {
             .map((e) => SourceHealth.fromJson(e as Map<String, dynamic>))
             .toList(),
         budget: BudgetOverview.fromJson((j['budget'] as Map<String, dynamic>?) ?? const {}),
+        llmUsage: j['llm_usage'] is Map<String, dynamic>
+            ? LlmUsageSummary.fromJson(j['llm_usage'] as Map<String, dynamic>)
+            : null,
       );
 }
 

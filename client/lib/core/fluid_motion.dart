@@ -261,3 +261,117 @@ class FluidPageRoute<T> extends PageRouteBuilder<T> {
           },
         );
 }
+
+/// 保留各 Tab 滚动状态的同时提供方向感切入过渡动画（桌面纵向随侧栏上下，移动端横向随底栏左右）。
+class FluidIndexedStack extends StatefulWidget {
+  final int index;
+  final List<Widget> children;
+  final Axis axis;
+
+  const FluidIndexedStack({
+    super.key,
+    required this.index,
+    required this.children,
+    this.axis = Axis.horizontal,
+  });
+
+  @override
+  State<FluidIndexedStack> createState() => _FluidIndexedStackState();
+}
+
+class _FluidIndexedStackState extends State<FluidIndexedStack> with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late int _currentIndex;
+  int? _previousIndex;
+  int _direction = 1;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentIndex = widget.index;
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 260),
+      value: 1.0,
+    )..addStatusListener((st) {
+        if (st == AnimationStatus.completed && mounted && _previousIndex != null) {
+          setState(() => _previousIndex = null);
+        }
+      });
+  }
+
+  @override
+  void didUpdateWidget(covariant FluidIndexedStack oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.index != _currentIndex) {
+      _direction = widget.index > _currentIndex ? 1 : -1;
+      _previousIndex = _currentIndex;
+      _currentIndex = widget.index;
+      final fluid = FluidMotionScope.of(context);
+      if (fluid) {
+        _ctrl.forward(from: 0.0);
+      } else {
+        _previousIndex = null;
+        _ctrl.value = 1.0;
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fluid = FluidMotionScope.of(context);
+    if (!fluid) {
+      return IndexedStack(index: widget.index, children: widget.children);
+    }
+
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (_, __) {
+        final t = Curves.easeOutCubic.transform(_ctrl.value);
+        final inOffset = widget.axis == Axis.horizontal
+            ? Offset((1.0 - t) * 0.055 * _direction, 0)
+            : Offset(0, (1.0 - t) * 0.035 * _direction);
+        final outOffset = widget.axis == Axis.horizontal
+            ? Offset(-t * 0.03 * _direction, 0)
+            : Offset(0, -t * 0.02 * _direction);
+        final inScale = 0.986 + 0.014 * t;
+
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            for (var i = 0; i < widget.children.length; i++)
+              if (i == _currentIndex)
+                Opacity(
+                  opacity: t.clamp(0.0, 1.0),
+                  child: FractionalTranslation(
+                    translation: inOffset,
+                    child: Transform.scale(
+                      scale: inScale,
+                      child: widget.children[i],
+                    ),
+                  ),
+                )
+              else if (i == _previousIndex && _ctrl.isAnimating)
+                IgnorePointer(
+                  child: Opacity(
+                    opacity: (1.0 - t).clamp(0.0, 1.0),
+                    child: FractionalTranslation(
+                      translation: outOffset,
+                      child: widget.children[i],
+                    ),
+                  ),
+                )
+              else
+                Offstage(offstage: true, child: TickerMode(enabled: false, child: widget.children[i])),
+          ],
+        );
+      },
+    );
+  }
+}

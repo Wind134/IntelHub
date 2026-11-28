@@ -110,4 +110,40 @@ func TestStoreLifecycleSearchTimelineAndBudget(t *testing.T) {
 	if err := st.BackupToFile(ctx, backupPath); err != nil {
 		t.Fatalf("backup failed: %v", err)
 	}
+
+	// Daily LLM token ledger aggregation
+	if err := st.RecordLLMUsage(ctx, model.LLMUsageRecord{
+		Provider:         "opencode-go",
+		Model:            "deepseek-v4.1-flash",
+		Scene:            "scoring",
+		PromptTokens:     500,
+		CompletionTokens: 120,
+		TotalTokens:      620,
+	}); err != nil {
+		t.Fatalf("record llm usage 1: %v", err)
+	}
+	if err := st.RecordLLMUsage(ctx, model.LLMUsageRecord{
+		Provider:         "opencode-go",
+		Model:            "deepseek-v4-pro",
+		Scene:            "ask_event",
+		PromptTokens:     1200,
+		CompletionTokens: 400,
+		TotalTokens:      1600,
+		Estimated:        true,
+	}); err != nil {
+		t.Fatalf("record llm usage 2: %v", err)
+	}
+	usage, err := st.GetLLMUsageSummary(ctx)
+	if err != nil {
+		t.Fatalf("get llm usage summary: %v", err)
+	}
+	if usage.Today.RequestCount != 2 || usage.Today.TotalTokens != 2220 || usage.Today.EstimatedCount != 1 {
+		t.Fatalf("unexpected today usage: %+v", usage.Today)
+	}
+	if len(usage.Daily7d) != 7 || usage.Daily7d[6].TotalTokens != 2220 {
+		t.Fatalf("expected 7 daily buckets ending with 2220, got %+v", usage.Daily7d)
+	}
+	if len(usage.ByScene) != 2 || len(usage.ByModel) != 2 {
+		t.Fatalf("expected 2 scenes & 2 models, got scenes=%+v models=%+v", usage.ByScene, usage.ByModel)
+	}
 }

@@ -1,0 +1,1073 @@
+package capital
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"math"
+	"net/http"
+	"net/url"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+var shanghaiTZ = time.FixedZone("Asia/Shanghai", 8*3600)
+
+// CNCollector 负责 A 股国家队核心 ETF 的双源/三源份额校验、历史回填与两阶段放量监控。
+type CNCollector struct {
+	repo       *Repo
+	ts         *TushareClient
+	http       *http.Client
+	onProgress ProgressFunc
+	onAlert    AlertSink
+}
+
+func (c *CNCollector) report(cur, total int, stage string) {
+	if c.onProgress != nil {
+		c.onProgress(cur, total, stage)
+	}
+}
+
+func NewCNCollector(repo *Repo, tushareToken string) *CNCollector {
+	return &CNCollector{
+		repo: repo,
+		ts:   NewTushareClient(tushareToken),
+		http: &http.Client{Timeout: 16 * time.Second},
+	}
+}
+
+// isLikelySplitOrCorrupt 区分“基金份额折算/拆合股或极端脏点”与“真实巨额护盘申赎”。
+// 真实拆合股必然伴随份额与净值反向变动（S_t/S_{t-1} * NAV_t/NAV_{t-1} ≈ 1），而真实大额申购净值不受份额暴增影响。
+func isLikelySplitOrCorrupt(prevSh, curSh, prevNAV, curNAV float64) bool {
+	if prevSh <= 0 || curSh <= 0 {
+		return true
+	}
+	shRatio := curSh / prevSh
+	if shRatio > 4.0 || shRatio < 0.20 {
+		return true
+	}
+	if prevNAV > 0 && curNAV > 0 && math.Abs(shRatio-1.0) > 0.25 {
+		navRatio := curNAV / prevNAV
+		if math.Abs(shRatio*navRatio-1.0) < 0.12 {
+			return true
+		}
+	}
+	return false
+}
+
+// ComputeVolRatio20 两阶段量比计算：盘中按 m/240 进度折算，盘后按全天计算。
+func ComputeVolRatio20(turnover float64, prevTurnovers []float64, elapsedMinutes int) float64 {
+	if turnover <= 0 || len(prevTurnovers) == 0 {
+		return 0
+	}
+	sum := 0.0
+	cnt := 0
+	for _, t := range prevTurnovers {
+		if t > 0 {
+			sum += t
+			cnt++
+		}
+	}
+	if cnt == 0 {
+		return 0
+	}
+	ma := sum / float64(cnt)
+	if elapsedMinutes <= 0 || elapsedMinutes >= 240 {
+		return turnover / ma
+	}
+	expected := ma * (float64(elapsedMinutes) / 240.0)
+	if expected <= 0 {
+		return 0
+	}
+	return turnover / expected
+}
+
+// ClassifyVolumeSignal 阶段一盘中预警 + 阶段二盘后份额定性。
+func ClassifyVolumeSignal(volRatio float64, netFlowYi float64, isIntraday bool) string {
+	if volRatio < 2.5 {
+		return "normal"
+	}
+	if isIntraday {
+		return "intraday_surge"
+	}
+	if netFlowYi > 0 {
+		return "confirmed_inflow"
+	}
+	return "high_turnover"
+}
+
+// ElapsedCNTradingMinutes 返回当前北京时间在 A 股 240 分钟交易时段中的已开盘分钟数；非盘中返回 240。
+func ElapsedCNTradingMinutes(now time.Time) (int, bool) {
+	bj := now.In(shanghaiTZ)
+	wd := bj.Weekday()
+	if wd == time.Saturday || wd == time.Sunday {
+		return 240, false
+	}
+	minOfDay := bj.Hour()*60 + bj.Minute()
+	// 上午 09:30 (570) - 11:30 (690)
+	if minOfDay >= 570 && minOfDay <= 690 {
+		return minOfDay - 570, true
+	}
+	// 午休 11:31 - 12:59 不再轮询上游，静默等待下午开盘
+	if minOfDay > 690 && minOfDay < 780 {
+		return 120, false
+	}
+	// 下午 13:00 (780) - 15:00 (900)
+	if minOfDay >= 780 && minOfDay < 900 {
+		return 120 + (minOfDay - 780), true
+	}
+	return 240, false
+}
+
+// SyncAll 执行 A 股国家队核心 ETF 完整同步（含首次 60 日历史回填 + 双源份额校验）。
+func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
+	watches, err := c.repo.ListWatchlist(ctx, "cn_etf")
+	if err != nil {
+		return err
+	}
+	if len(watches) == 0 {
+		return nil
+	}
+
+	elapsedMin, isIntraday := ElapsedCNTradingMinutes(time.Now())
+	if intradayOnly && !isIntraday {
+		return nil
+	}
+
+	// 1. 批量拉取东财精确总份额 f38 + 实时价 f2 + 成交额 f6（盘中仅发这 1 次批量请求；失败自动降级腾讯全球 CDN）
+	c.report(5, 100, "拉取实时行情与官方份额...")
+	emMap, err := c.fetchEastmoneyQuotes(ctx, watches)
+	if (err != nil || len(emMap) == 0) && intradayOnly {
+		if txMap, txErr := c.fetchTencentQuotes(ctx, watches); txErr == nil && len(txMap) > 0 {
+			emMap = make(map[string]emQuote, len(txMap))
+			for code, tq := range txMap {
+				sh := 0.0
+				if tq.Close > 0 && tq.MktCapYi > 0 {
+					sh = (tq.MktCapYi * 1e8) / tq.Close
+				}
+				emMap[code] = emQuote{Close: tq.Close, TurnoverRMB: tq.TurnoverRMB, Shares: sh}
+			}
+			err = nil
+		}
+	}
+	if err != nil {
+		if !intradayOnly {
+			c.repo.SetSyncStatus(ctx, SyncStatus{Market: "cn_etf", Status: "error", ErrorMsg: err.Error(), SourceLabel: "SSE/东财/腾讯双源"})
+		}
+		return err
+	}
+
+	todayBJ := time.Now().In(shanghaiTZ).Format("2006-01-02")
+
+	// 盘中轻量模式：仅使用上述 1 次批量请求更新实时价、实时成交额与折算量比，不碰交易所/净值/Tushare，不污染前日精确份额
+	if intradayOnly {
+		var updates []CNETFDaily
+		for _, w := range watches {
+			em, ok := emMap[w.Code]
+			if !ok || em.TurnoverRMB <= 0 {
+				continue
+			}
+			existing, _ := c.repo.GetCNETFSeries(ctx, w.Code, 25)
+			var prevTurnovers []float64
+			prevShares := em.Shares
+			prevNAV := em.Close
+			for _, row := range existing {
+				if row.TradeDate < todayBJ {
+					if row.TotalShares > 0 {
+						prevShares = row.TotalShares
+					}
+					if row.NAV > 0 {
+						prevNAV = row.NAV
+					}
+					if row.TurnoverRMB > 0 {
+						prevTurnovers = append(prevTurnovers, row.TurnoverRMB)
+					}
+				}
+			}
+			if len(prevTurnovers) > 20 {
+				prevTurnovers = prevTurnovers[len(prevTurnovers)-20:]
+			}
+			// 开盘前 5 分钟（09:30-09:34）集合竞价成交天然偏高，仅刷新价格成交额，不触发放量假警报
+			volRatio := 0.0
+			sig := "normal"
+			if elapsedMin >= 5 {
+				volRatio = ComputeVolRatio20(em.TurnoverRMB, prevTurnovers, elapsedMin)
+				sig = ClassifyVolumeSignal(volRatio, 0, true)
+			}
+			row := CNETFDaily{
+				Code:          w.Code,
+				TradeDate:     todayBJ,
+				TotalShares:   prevShares,
+				ShareDelta:    0,
+				NAV:           prevNAV,
+				ClosePrice:    em.Close,
+				TurnoverRMB:   em.TurnoverRMB,
+				NetFlowRMB:    0,
+				VolRatio20:    volRatio,
+				VolumeSignal:  sig,
+				IsIntraday:    true,
+				VerifyStatus:  "SINGLE_SOURCE",
+				SourceNote:    "盘中实时成交量比观测（份额净申赎待收盘后官方清算）",
+				PrimaryShares: prevShares,
+			}
+			updates = append(updates, row)
+			c.maybeEmitIntradayAlert(ctx, w, row)
+		}
+		if len(updates) > 0 {
+			_ = c.repo.UpsertCNETFDailyBatch(ctx, updates)
+		}
+		return nil
+	}
+
+	// 2. 批量拉取腾讯 CDN 行情（用于深市反算核验 + 备源）
+	txMap, _ := c.fetchTencentQuotes(ctx, watches)
+	// 3. 拉取上交所官方每日 ETF 规模（沪市主源）
+	sseMap, sseDate, _ := c.fetchSSEScaleMapByDate(ctx, "")
+	latestDate := sseDate
+	if latestDate == "" {
+		latestDate = todayBJ
+	}
+
+	synced := 0
+	for _, w := range watches {
+		if ctx.Err() != nil {
+			break
+		}
+		existing, _ := c.repo.GetCNETFSeries(ctx, w.Code, 95)
+		// 首次或不足 85 个交易日时回填近 95 个交易日 NAV + 成交额基线
+		if len(existing) < 85 && !intradayOnly {
+			if err := c.backfillHistory(ctx, w); err != nil {
+				log.Printf("[capital:cn] backfill %s warn: %v", w.Code, err)
+			}
+			existing, _ = c.repo.GetCNETFSeries(ctx, w.Code, 95)
+		}
+
+		em, hasEM := emMap[w.Code]
+		if !hasEM || em.Shares <= 0 {
+			continue
+		}
+
+		// 双源份额交叉核验（容差 <= 0.2%）
+		primaryShares := em.Shares
+		backupShares := 0.0
+		verifyStatus := "SINGLE_SOURCE"
+		sourceNote := "东财官方总份额(f38)"
+
+		if w.Exchange == "SH" {
+			if sseSh, ok := sseMap[w.Code]; ok && sseSh > 0 {
+				primaryShares = sseSh
+				backupShares = em.Shares
+				diffEM := math.Abs(sseSh-em.Shares) / sseSh
+				diffTX := 1.0
+				if tx, ok := txMap[w.Code]; ok && tx.Close > 0 && tx.MktCapYi > 0 {
+					txSh := (tx.MktCapYi * 1e8) / tx.Close
+					diffTX = math.Abs(sseSh-txSh) / sseSh
+					if diffTX < diffEM {
+						backupShares = txSh
+					}
+				}
+				switch {
+				case diffEM <= 0.005 || diffTX <= 0.01:
+					verifyStatus = "VERIFIED"
+					sourceNote = "上交所官方 + 备源双源核验通过"
+				default:
+					verifyStatus = "SINGLE_SOURCE"
+					sourceNote = "上交所官方披露份额（以交易所终值为准）"
+				}
+			}
+		} else {
+			if tx, ok := txMap[w.Code]; ok && tx.Close > 0 && tx.MktCapYi > 0 {
+				backupShares = (tx.MktCapYi * 1e8) / tx.Close
+				diff := math.Abs(primaryShares-backupShares) / primaryShares
+				if diff <= 0.01 {
+					verifyStatus = "VERIFIED"
+					sourceNote = "东财f38 + 腾讯CDN 双源核验通过"
+				} else {
+					verifyStatus = "SINGLE_SOURCE"
+					sourceNote = "东财精确总份额(f38)"
+				}
+			}
+		}
+
+		// 最新官方单位净值（来自东财净值库 lsjz）
+		nav, navDate := c.fetchLatestNAV(ctx, w.Code)
+		if nav <= 0 {
+			nav = em.Close
+		}
+		tradeDate := navDate
+		if isIntraday {
+			tradeDate = todayBJ
+		} else if tradeDate == "" {
+			tradeDate = latestDate
+		}
+		if tradeDate > latestDate {
+			latestDate = tradeDate
+		}
+
+		// 提取前 20 日成交额与前一日份额/净值计算真实 ΔS(t) 与两阶段量比
+		var prevTurnovers []float64
+		prevShares := 0.0
+		prevNAV := 0.0
+		for _, row := range existing {
+			if row.TradeDate < tradeDate {
+				prevShares = row.TotalShares
+				prevNAV = row.NAV
+				if prevNAV <= 0 {
+					prevNAV = row.ClosePrice
+				}
+				if row.TurnoverRMB > 0 {
+					prevTurnovers = append(prevTurnovers, row.TurnoverRMB)
+				}
+			}
+		}
+		if len(prevTurnovers) > 20 {
+			prevTurnovers = prevTurnovers[len(prevTurnovers)-20:]
+		}
+
+		shareDelta := 0.0
+		netFlowYi := 0.0
+		if prevShares > 0 {
+			if !isLikelySplitOrCorrupt(prevShares, primaryShares, prevNAV, nav) {
+				shareDelta = primaryShares - prevShares
+				netFlowYi = (shareDelta * nav) / 1e8
+			} else {
+				verifyStatus = "WARN"
+				sourceNote = "检测到份额折算或极端突变，已触发熔断保护"
+			}
+		}
+
+		volRatio := ComputeVolRatio20(em.TurnoverRMB, prevTurnovers, elapsedMin)
+		sig := ClassifyVolumeSignal(volRatio, netFlowYi, isIntraday)
+
+		row := CNETFDaily{
+			Code:          w.Code,
+			TradeDate:     tradeDate,
+			TotalShares:   primaryShares,
+			ShareDelta:    shareDelta,
+			NAV:           nav,
+			ClosePrice:    em.Close,
+			TurnoverRMB:   em.TurnoverRMB,
+			NetFlowRMB:    netFlowYi,
+			VolRatio20:    volRatio,
+			VolumeSignal:  sig,
+			IsIntraday:    isIntraday,
+			VerifyStatus:  verifyStatus,
+			SourceNote:    sourceNote,
+			PrimaryShares: primaryShares,
+			BackupShares:  backupShares,
+		}
+		if err := c.repo.UpsertCNETFDailyBatch(ctx, []CNETFDaily{row}); err == nil {
+			synced++
+		}
+		c.report(10+(synced*30)/maxInt(1, len(watches)), 100, fmt.Sprintf("核验当日份额 %s (%d/%d)", w.Code, synced, len(watches)))
+	}
+
+	if !intradayOnly {
+		c.report(42, 100, "检查上交所近月官方份额...")
+		c.backfillSSEHistoricalShares(ctx, watches, "2026-11-01")
+		if c.ts.Enabled() {
+			since90 := time.Now().In(shanghaiTZ).AddDate(0, 0, -145).Format("2006-01-02")
+			c.report(55, 100, "Tushare Pro fund_share 回填近90交易日沪深官方份额...")
+			c.backfillTushareHistoricalShares(ctx, watches, since90)
+		}
+		c.report(85, 100, "更新最新定期报告机构持仓占比...")
+		c.syncInstitutionalHolders(ctx, watches)
+	}
+
+	srcLabel := "上交所官方 + 东财精确总份额 + 腾讯CDN双源核验"
+	if c.ts.Enabled() {
+		srcLabel = "上交所/东财/腾讯 + Tushare Pro fund_share 三源核验"
+	}
+	c.repo.SetSyncStatus(ctx, SyncStatus{
+		Market:      "cn_etf",
+		Status:      "ok",
+		DataAsOf:    latestDate,
+		ItemCount:   synced,
+		SourceLabel: srcLabel,
+	})
+	if !intradayOnly && latestDate == todayBJ {
+		c.maybeEmitEODSummaryAlert(ctx, todayBJ)
+	}
+	return nil
+}
+
+type emQuote struct {
+	Close       float64
+	TurnoverRMB float64
+	Shares      float64
+}
+
+func (c *CNCollector) fetchEastmoneyQuotes(ctx context.Context, watches []WatchItem) (map[string]emQuote, error) {
+	secids := make([]string, 0, len(watches))
+	for _, w := range watches {
+		prefix := "0"
+		if w.Exchange == "SH" || strings.HasPrefix(w.Code, "5") {
+			prefix = "1"
+		}
+		secids = append(secids, prefix+"."+w.Code)
+	}
+	u := "https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f2,f6,f12,f20,f38&secids=" + url.QueryEscape(strings.Join(secids, ","))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var payload struct {
+		Data struct {
+			Diff []struct {
+				Code     string  `json:"f12"`
+				Close    float64 `json:"f2"`
+				Turnover float64 `json:"f6"`
+				Shares   float64 `json:"f38"`
+			} `json:"diff"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2*1024*1024)).Decode(&payload); err != nil {
+		return nil, err
+	}
+	out := make(map[string]emQuote, len(payload.Data.Diff))
+	for _, d := range payload.Data.Diff {
+		out[d.Code] = emQuote{Close: d.Close, TurnoverRMB: d.Turnover, Shares: d.Shares}
+	}
+	return out, nil
+}
+
+type txQuote struct {
+	Close       float64
+	TurnoverRMB float64
+	MktCapYi    float64
+}
+
+func (c *CNCollector) fetchTencentQuotes(ctx context.Context, watches []WatchItem) (map[string]txQuote, error) {
+	codes := make([]string, 0, len(watches))
+	for _, w := range watches {
+		prefix := "sz"
+		if w.Exchange == "SH" || strings.HasPrefix(w.Code, "5") {
+			prefix = "sh"
+		}
+		codes = append(codes, prefix+w.Code)
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://qt.gtimg.cn/q="+strings.Join(codes, ","), nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	out := make(map[string]txQuote)
+	for _, line := range strings.Split(string(raw), "\n") {
+		parts := strings.Split(line, "~")
+		if len(parts) < 46 {
+			continue
+		}
+		code := strings.TrimSpace(parts[2])
+		cl, _ := strconv.ParseFloat(parts[3], 64)
+		toWan, _ := strconv.ParseFloat(parts[37], 64)
+		mc, _ := strconv.ParseFloat(parts[45], 64)
+		if code != "" && cl > 0 {
+			out[code] = txQuote{Close: cl, TurnoverRMB: toWan * 10000.0, MktCapYi: mc}
+		}
+	}
+	return out, nil
+}
+
+func (c *CNCollector) fetchSSEScaleMapByDate(ctx context.Context, statDate string) (map[string]float64, string, error) {
+	u := "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L&isPagination=true&pageHelp.pageSize=2000&pageHelp.pageNo=1"
+	if strings.TrimSpace(statDate) != "" {
+		u += "&STAT_DATE=" + url.QueryEscape(strings.TrimSpace(statDate))
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req.Header.Set("Referer", "https://www.sse.com.cn/")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	var payload struct {
+		Result []struct {
+			StatDate string `json:"STAT_DATE"`
+			SecCode  string `json:"SEC_CODE"`
+			TotVol   string `json:"TOT_VOL"` // 单位：万份
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4*1024*1024)).Decode(&payload); err != nil {
+		return nil, "", err
+	}
+	out := make(map[string]float64, len(payload.Result))
+	resolvedDate := ""
+	for _, r := range payload.Result {
+		if r.StatDate > resolvedDate {
+			resolvedDate = r.StatDate
+		}
+		v, err := strconv.ParseFloat(strings.TrimSpace(r.TotVol), 64)
+		if err == nil && v > 0 {
+			out[strings.TrimSpace(r.SecCode)] = v * 10000.0
+		}
+	}
+	return out, resolvedDate, nil
+}
+
+// backfillSSEHistoricalShares 按交易日回填沪市 ETF 自 sinceDate 起的官方精确每日份额与净申赎流向。
+func (c *CNCollector) backfillSSEHistoricalShares(ctx context.Context, watches []WatchItem, sinceDate string) {
+	var shWatches []WatchItem
+	for _, w := range watches {
+		if w.Exchange == "SH" || strings.HasPrefix(w.Code, "5") {
+			shWatches = append(shWatches, w)
+		}
+	}
+	if len(shWatches) == 0 {
+		return
+	}
+
+	// 取代表性沪市 ETF 的历史交易日序列，找出待补齐官方份额的交易日（含 sinceDate 前一日作基准）
+	refSeries, _ := c.repo.GetCNETFSeries(ctx, shWatches[0].Code, 65)
+	if len(refSeries) < 2 {
+		return
+	}
+	startIdx := len(refSeries)
+	for i, d := range refSeries {
+		if d.TradeDate >= sinceDate {
+			startIdx = i
+			break
+		}
+	}
+	if startIdx >= len(refSeries) {
+		return
+	}
+	baseIdx := maxInt(0, startIdx-1)
+
+	var needDates []string
+	for i := baseIdx; i < len(refSeries); i++ {
+		if !strings.Contains(refSeries[i].SourceNote, "上交所官方") {
+			needDates = append(needDates, refSeries[i].TradeDate)
+		}
+	}
+	if len(needDates) == 0 {
+		return
+	}
+
+	log.Printf("[capital:cn] backfilling SSE official daily shares for %d trading days since %s...", len(needDates), sinceDate)
+	dateShares := make(map[string]map[string]float64, len(needDates))
+	for _, dt := range needDates {
+		if ctx.Err() != nil {
+			return
+		}
+		m, _, err := c.fetchSSEScaleMapByDate(ctx, dt)
+		if err == nil && len(m) > 0 {
+			dateShares[dt] = m
+		}
+		time.Sleep(180 * time.Millisecond)
+	}
+	if len(dateShares) == 0 {
+		return
+	}
+
+	for _, w := range shWatches {
+		series, err := c.repo.GetCNETFSeries(ctx, w.Code, 95)
+		if err != nil || len(series) < 2 {
+			continue
+		}
+		// 先填补每日官方总份额
+		touched := false
+		for i := range series {
+			if m, ok := dateShares[series[i].TradeDate]; ok {
+				if sh, exists := m[w.Code]; exists && sh > 0 {
+					series[i].TotalShares = sh
+					series[i].PrimaryShares = sh
+					series[i].VerifyStatus = "VERIFIED"
+					series[i].SourceNote = "上交所官方历史每日份额"
+					touched = true
+				}
+			}
+		}
+		if !touched {
+			continue
+		}
+		// 从基准日之后逐日精确重算 ΔS(t)、Flow_ETF(t) 及两阶段量比定性
+		var updates []CNETFDaily
+		for i := 1; i < len(series); i++ {
+			if series[i].TradeDate < sinceDate {
+				if _, ok := dateShares[series[i].TradeDate]; ok {
+					updates = append(updates, series[i])
+				}
+				continue
+			}
+			prevSh := series[i-1].TotalShares
+			curSh := series[i].TotalShares
+			if prevSh <= 0 || curSh <= 0 {
+				continue
+			}
+			px := series[i].NAV
+			if px <= 0 {
+				px = series[i].ClosePrice
+			}
+			prevPx := series[i-1].NAV
+			if prevPx <= 0 {
+				prevPx = series[i-1].ClosePrice
+			}
+			if !isLikelySplitOrCorrupt(prevSh, curSh, prevPx, px) {
+				series[i].ShareDelta = curSh - prevSh
+				series[i].NetFlowRMB = (series[i].ShareDelta * px) / 1e8
+			}
+			var prevT []float64
+			for j := maxInt(0, i-20); j < i; j++ {
+				prevT = append(prevT, series[j].TurnoverRMB)
+			}
+			series[i].VolRatio20 = ComputeVolRatio20(series[i].TurnoverRMB, prevT, 240)
+			series[i].VolumeSignal = ClassifyVolumeSignal(series[i].VolRatio20, series[i].NetFlowRMB, false)
+			updates = append(updates, series[i])
+		}
+		if len(updates) > 0 {
+			_ = c.repo.UpsertCNETFDailyBatch(ctx, updates)
+		}
+	}
+}
+
+func (c *CNCollector) fetchLatestNAV(ctx context.Context, code string) (float64, string) {
+	u := fmt.Sprintf("https://api.fund.eastmoney.com/f10/lsjz?fundCode=%s&pageIndex=1&pageSize=2", code)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req.Header.Set("Referer", "https://fundf10.eastmoney.com/")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, ""
+	}
+	defer resp.Body.Close()
+	var payload struct {
+		Data struct {
+			List []struct {
+				FSRQ string `json:"FSRQ"`
+				DWJZ string `json:"DWJZ"`
+			} `json:"LSJZList"`
+		} `json:"Data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&payload); err != nil || len(payload.Data.List) == 0 {
+		return 0, ""
+	}
+	nav, _ := strconv.ParseFloat(payload.Data.List[0].DWJZ, 64)
+	return nav, payload.Data.List[0].FSRQ
+}
+
+// backfillHistory 回填近 95 个交易日的净值、成交额基线（已存在官方份额的日期不会被覆盖）。
+func (c *CNCollector) backfillHistory(ctx context.Context, w WatchItem) error {
+	existing, _ := c.repo.GetCNETFSeries(ctx, w.Code, 110)
+	hasDate := make(map[string]bool, len(existing))
+	for _, d := range existing {
+		hasDate[d.TradeDate] = true
+	}
+
+	// 1. 拉取近 95 日官方净值
+	navMap := map[string]float64{}
+	uNav := fmt.Sprintf("https://api.fund.eastmoney.com/f10/lsjz?fundCode=%s&pageIndex=1&pageSize=95", w.Code)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, uNav, nil)
+	req.Header.Set("Referer", "https://fundf10.eastmoney.com/")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	if resp, err := c.http.Do(req); err == nil {
+		var p struct {
+			Data struct {
+				List []struct {
+					FSRQ string `json:"FSRQ"`
+					DWJZ string `json:"DWJZ"`
+				} `json:"LSJZList"`
+			} `json:"Data"`
+		}
+		if json.NewDecoder(io.LimitReader(resp.Body, 512*1024)).Decode(&p) == nil {
+			for _, it := range p.Data.List {
+				if v, err := strconv.ParseFloat(it.DWJZ, 64); err == nil && v > 0 {
+					navMap[it.FSRQ] = v
+				}
+			}
+		}
+		resp.Body.Close()
+	}
+
+	// 2. 拉取近 60 日 K 线（收盘价与成交额）
+	prefix := "0"
+	if w.Exchange == "SH" || strings.HasPrefix(w.Code, "5") {
+		prefix = "1"
+	}
+	uKline := fmt.Sprintf("https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=%s.%s&fields1=f1,f2,f3&fields2=f51,f53,f57&klt=101&fqt=0&end=20500101&lmt=95", prefix, w.Code)
+	kReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, uKline, nil)
+	kReq.Header.Set("User-Agent", "Mozilla/5.0")
+	type kRow struct {
+		Date     string
+		Close    float64
+		Turnover float64
+	}
+	var klines []kRow
+	if resp, err := c.http.Do(kReq); err == nil {
+		var kp struct {
+			Data struct {
+				Klines []string `json:"klines"`
+			} `json:"data"`
+		}
+		if json.NewDecoder(io.LimitReader(resp.Body, 512*1024)).Decode(&kp) == nil {
+			for _, line := range kp.Data.Klines {
+				parts := strings.Split(line, ",")
+				if len(parts) < 3 {
+					continue
+				}
+				cl, _ := strconv.ParseFloat(parts[1], 64)
+				to, _ := strconv.ParseFloat(parts[2], 64)
+				klines = append(klines, kRow{Date: parts[0], Close: cl, Turnover: to})
+			}
+		}
+		resp.Body.Close()
+	}
+	if len(klines) == 0 {
+		return nil
+	}
+
+	// 3. 拉取 pingzhongdata 历史规模变动点（用于填补最近季报份额基准，日度流向将由每日持续采集逐步累积精确值）
+	var latestScaleShares float64
+	emQ, err := c.fetchEastmoneyQuotes(ctx, []WatchItem{w})
+	if err == nil {
+		latestScaleShares = emQ[w.Code].Shares
+	}
+	sort.Slice(klines, func(i, j int) bool { return klines[i].Date < klines[j].Date })
+
+	var batch []CNETFDaily
+	for i, k := range klines {
+		if hasDate[k.Date] {
+			continue
+		}
+		nav := navMap[k.Date]
+		if nav <= 0 {
+			nav = k.Close
+		}
+		var prevT []float64
+		for j := maxInt(0, i-20); j < i; j++ {
+			prevT = append(prevT, klines[j].Turnover)
+		}
+		vr := ComputeVolRatio20(k.Turnover, prevT, 240)
+		batch = append(batch, CNETFDaily{
+			Code:          w.Code,
+			TradeDate:     k.Date,
+			TotalShares:   latestScaleShares,
+			ShareDelta:    0,
+			NAV:           nav,
+			ClosePrice:    k.Close,
+			TurnoverRMB:   k.Turnover,
+			NetFlowRMB:    0,
+			VolRatio20:    vr,
+			VolumeSignal:  ClassifyVolumeSignal(vr, 0, false),
+			IsIntraday:    false,
+			VerifyStatus:  "SINGLE_SOURCE",
+			SourceNote:    "历史净值与成交额基线（份额净流向自采集日起逐日精确累算）",
+			PrimaryShares: latestScaleShares,
+		})
+	}
+	return c.repo.UpsertCNETFDailyBatch(ctx, batch)
+}
+
+// backfillTushareHistoricalShares 利用 Tushare Pro fund_share 补齐深交所（及沪市三源核验）自 sinceDate 起的全部历史每日份额与净申赎。
+func (c *CNCollector) backfillTushareHistoricalShares(ctx context.Context, watches []WatchItem, sinceDate string) {
+	if !c.ts.Enabled() {
+		return
+	}
+	endDate := time.Now().In(shanghaiTZ).Format("2006-01-02")
+	// 提前一周开始拉取，确保 sinceDate 首日拥有前一个交易日的准确份额基准
+	startPull := "2026-10-20"
+	if t, err := time.Parse("2006-01-02", sinceDate); err == nil {
+		startPull = t.AddDate(0, 0, -12).Format("2006-01-02")
+	}
+
+	log.Printf("[capital:cn] backfilling ETF daily shares via Tushare Pro fund_share since %s...", sinceDate)
+	for idx, w := range watches {
+		if ctx.Err() != nil {
+			return
+		}
+		c.report(55+(idx*30)/maxInt(1, len(watches)), 100, fmt.Sprintf("Tushare fund_share %s (%d/%d)", toTSCode(w.Code, w.Exchange), idx+1, len(watches)))
+		series, err := c.repo.GetCNETFSeries(ctx, w.Code, 95)
+		if err != nil || len(series) < 2 {
+			continue
+		}
+		tsCode := toTSCode(w.Code, w.Exchange)
+		shareMap, err := c.ts.FetchFundShare(ctx, tsCode, startPull, endDate)
+		if err != nil {
+			log.Printf("[capital:cn] tushare fund_share %s warn: %v", tsCode, err)
+			continue
+		}
+		if len(shareMap) == 0 {
+			continue
+		}
+
+		// 若某天缺少东财净值，顺带用 Tushare fund_nav 补齐
+		var navBackup map[string]float64
+		for _, d := range series {
+			if d.TradeDate >= startPull && d.NAV <= 0 {
+				navBackup, _ = c.ts.FetchFundNAV(ctx, tsCode, startPull, endDate)
+				break
+			}
+		}
+
+		// 找到 sinceDate 之前最近一次已知份额作为基线（兼容无变动日不重复上报的会计规则）
+		var sortedTSDates []string
+		for dt := range shareMap {
+			sortedTSDates = append(sortedTSDates, dt)
+		}
+		sort.Strings(sortedTSDates)
+
+		lookupShare := func(dt string) (float64, bool) {
+			if v, ok := shareMap[dt]; ok && v > 0 {
+				return v, true
+			}
+			// 若该日无新披露记录，沿用此前最近一个已披露份额
+			last := 0.0
+			for _, d := range sortedTSDates {
+				if d <= dt {
+					last = shareMap[d]
+				} else {
+					break
+				}
+			}
+			return last, last > 0
+		}
+
+		isSZ := w.Exchange == "SZ" || !strings.HasPrefix(w.Code, "5")
+		touched := false
+		for i := range series {
+			dt := series[i].TradeDate
+			if dt < startPull {
+				continue
+			}
+			tsSh, ok := lookupShare(dt)
+			if !ok {
+				continue
+			}
+			if navBackup != nil && series[i].NAV <= 0 {
+				if nv := navBackup[dt]; nv > 0 {
+					series[i].NAV = nv
+				}
+			}
+			hasSSEOfficial := !isSZ && strings.Contains(series[i].SourceNote, "上交所官方") && series[i].TotalShares > 0
+			if hasSSEOfficial {
+				// 已有上交所官方份额时，Tushare 作为第三独立源执行三源核验
+				diff := math.Abs(series[i].TotalShares-tsSh) / series[i].TotalShares
+				series[i].BackupShares = tsSh
+				if diff <= 0.005 {
+					series[i].VerifyStatus = "VERIFIED"
+					series[i].SourceNote = "上交所官方 + Tushare Pro 三源核验通过"
+					touched = true
+				}
+			} else {
+				// 深市全部交易日及沪市更早历史交易日均用 Tushare Pro 官方清算份额补齐
+				series[i].TotalShares = tsSh
+				series[i].PrimaryShares = tsSh
+				series[i].VerifyStatus = "VERIFIED"
+				series[i].SourceNote = "Tushare Pro fund_share 官方历史份额"
+				touched = true
+			}
+		}
+		if !touched {
+			continue
+		}
+
+		var updates []CNETFDaily
+		for i := 0; i < len(series); i++ {
+			if series[i].TradeDate < startPull {
+				continue
+			}
+			if i > 0 {
+				prevSh := series[i-1].TotalShares
+				curSh := series[i].TotalShares
+				if prevSh > 0 && curSh > 0 {
+					px := series[i].NAV
+					if px <= 0 {
+						px = series[i].ClosePrice
+					}
+					prevPx := series[i-1].NAV
+					if prevPx <= 0 {
+						prevPx = series[i-1].ClosePrice
+					}
+					if !isLikelySplitOrCorrupt(prevSh, curSh, prevPx, px) {
+						series[i].ShareDelta = curSh - prevSh
+						series[i].NetFlowRMB = (series[i].ShareDelta * px) / 1e8
+					}
+				}
+				var prevT []float64
+				for j := maxInt(0, i-20); j < i; j++ {
+					prevT = append(prevT, series[j].TurnoverRMB)
+				}
+				series[i].VolRatio20 = ComputeVolRatio20(series[i].TurnoverRMB, prevT, 240)
+				series[i].VolumeSignal = ClassifyVolumeSignal(series[i].VolRatio20, series[i].NetFlowRMB, false)
+			}
+			updates = append(updates, series[i])
+		}
+		if len(updates) > 0 {
+			_ = c.repo.UpsertCNETFDailyBatch(ctx, updates)
+		}
+		time.Sleep(180 * time.Millisecond)
+	}
+}
+
+var reCyrjgRow = regexp.MustCompile(`<tr><td>(\d{4}-\d{2}-\d{2})</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td></tr>`)
+
+// syncInstitutionalHolders 抓取每只 ETF 最新官方定期报告（中报/年报）的机构持仓结构，替代静态硬编码数据。
+func (c *CNCollector) syncInstitutionalHolders(ctx context.Context, watches []WatchItem) {
+	for idx, w := range watches {
+		if ctx.Err() != nil {
+			return
+		}
+		c.report(85+(idx*14)/maxInt(1, len(watches)), 100, fmt.Sprintf("同步机构占比 %s (%d/%d)", w.Code, idx+1, len(watches)))
+		u := fmt.Sprintf("https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=cyrjg&code=%s", w.Code)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		req.Header.Set("Referer", "https://fundf10.eastmoney.com/")
+		req.Header.Set("User-Agent", "Mozilla/5.0")
+		resp, err := c.http.Do(req)
+		if err != nil {
+			c.syncInstitutionalHolderSinaFallback(ctx, w.Code)
+			continue
+		}
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+		resp.Body.Close()
+
+		matches := reCyrjgRow.FindAllStringSubmatch(string(raw), 2)
+		if len(matches) == 0 {
+			c.syncInstitutionalHolderSinaFallback(ctx, w.Code)
+			continue
+		}
+		srcURL := fmt.Sprintf("https://fundf10.eastmoney.com/cyrjg_%s.html", w.Code)
+		for _, m := range matches {
+			repDate := strings.TrimSpace(m[1])
+			instPct, err1 := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(m[2]), "%"), 64)
+			totSharesYi, err2 := strconv.ParseFloat(strings.ReplaceAll(strings.TrimSpace(m[5]), ",", ""), 64)
+			if err1 != nil || instPct <= 0 {
+				continue
+			}
+			repType := "年报机构结构"
+			if strings.HasSuffix(repDate, "-06-30") {
+				repType = "中报机构结构"
+			}
+			sharesHeld := 0.0
+			if err2 == nil && totSharesYi > 0 {
+				sharesHeld = totSharesYi * 1e8 * (instPct / 100.0)
+			}
+			repNAV := c.fetchHistoricalNAVOnOrBefore(ctx, w.Code, w.Exchange, repDate)
+			filingValYi := 0.0
+			if sharesHeld > 0 && repNAV > 0 {
+				filingValYi = (sharesHeld * repNAV) / 1e8
+			}
+			_ = c.repo.UpsertCNETFHolder(ctx, CNETFHolder{
+				Code:          w.Code,
+				ReportDate:    repDate,
+				ReportType:    repType,
+				HolderName:    "机构投资者合计（定期报告官方披露）",
+				SharesHeld:    sharesHeld,
+				HoldRatioPct:  instPct,
+				FilingValueYi: filingValYi,
+				SourceURL:     srcURL,
+			})
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (c *CNCollector) syncInstitutionalHolderSinaFallback(ctx context.Context, code string) {
+	u := fmt.Sprintf("https://stock.finance.sina.com.cn/fundInfo/api/openapi.php/FundPageInfoService.tabcyrjg?symbol=%s", code)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req.Header.Set("Referer", "https://finance.sina.com.cn/")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	var p struct {
+		Result struct {
+			Data struct {
+				CYRInfo struct {
+					BDRQ   string `json:"bdrq"`
+					JGCYBL string `json:"jgcybl"`
+					JGCYFE string `json:"jgcyfe"`
+				} `json:"CYRInfo"`
+			} `json:"data"`
+		} `json:"result"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&p) != nil {
+		return
+	}
+	pct, err := strconv.ParseFloat(strings.TrimSpace(p.Result.Data.CYRInfo.JGCYBL), 64)
+	if err != nil || pct <= 0 {
+		return
+	}
+	sh, _ := strconv.ParseFloat(strings.TrimSpace(p.Result.Data.CYRInfo.JGCYFE), 64)
+	repDate := "2026-06-30"
+	if yr := strings.Split(p.Result.Data.CYRInfo.BDRQ, ".")[0]; len(yr) == 4 {
+		repDate = yr + "-06-30"
+	}
+	repNAV := c.fetchHistoricalNAVOnOrBefore(ctx, code, "", repDate)
+	filingValYi := 0.0
+	if sh > 0 && repNAV > 0 {
+		filingValYi = (sh * repNAV) / 1e8
+	}
+	_ = c.repo.UpsertCNETFHolder(ctx, CNETFHolder{
+		Code:          code,
+		ReportDate:    repDate,
+		ReportType:    "中报机构结构",
+		HolderName:    "机构投资者合计（定期报告官方披露）",
+		SharesHeld:    sh,
+		HoldRatioPct:  pct,
+		FilingValueYi: filingValYi,
+		SourceURL:     fmt.Sprintf("https://finance.sina.com.cn/fund/quotes/%s/bc.shtml", code),
+	})
+}
+
+// fetchHistoricalNAVOnOrBefore 获取指定报告期末日（或之前最近交易日）的官方单位净值，用于精确计算报告期末持仓市值。
+func (c *CNCollector) fetchHistoricalNAVOnOrBefore(ctx context.Context, code, exchange, targetDate string) float64 {
+	t, err := time.Parse("2006-01-02", targetDate)
+	if err != nil {
+		return 0
+	}
+	startStr := t.AddDate(0, 0, -10).Format("2006-01-02")
+	// 1. 优先 Tushare Pro fund_nav
+	if c.ts.Enabled() {
+		if m, err := c.ts.FetchFundNAV(ctx, toTSCode(code, exchange), startStr, targetDate); err == nil && len(m) > 0 {
+			bestDate := ""
+			bestNAV := 0.0
+			for dt, nv := range m {
+				if dt <= targetDate && dt > bestDate && nv > 0 {
+					bestDate = dt
+					bestNAV = nv
+				}
+			}
+			if bestNAV > 0 {
+				return bestNAV
+			}
+		}
+	}
+	// 2. 备用：东财官方净值库按日期区间查询
+	u := fmt.Sprintf("https://api.fund.eastmoney.com/f10/lsjz?fundCode=%s&pageIndex=1&pageSize=10&startDate=%s&endDate=%s", code, startStr, targetDate)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req.Header.Set("Referer", "https://fundf10.eastmoney.com/")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	var p struct {
+		Data struct {
+			List []struct {
+				FSRQ string `json:"FSRQ"`
+				DWJZ string `json:"DWJZ"`
+			} `json:"LSJZList"`
+		} `json:"Data"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&p) == nil && len(p.Data.List) > 0 {
+		if v, err := strconv.ParseFloat(p.Data.List[0].DWJZ, 64); err == nil && v > 0 {
+			return v
+		}
+	}
+	return 0
+}

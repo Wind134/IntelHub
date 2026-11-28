@@ -23,12 +23,15 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	ListenAddr   string `yaml:"listen_addr"`
-	DBPath       string `yaml:"db_path"`
-	APIToken     string `yaml:"api_token"`
-	PublicURL    string `yaml:"public_url"`
-	BackupDir    string `yaml:"backup_dir"`
-	BackupRemote string `yaml:"backup_remote"`
+	ListenAddr     string `yaml:"listen_addr"`
+	CapitalWebAddr string `yaml:"capital_web_addr"`
+	DBPath         string `yaml:"db_path"`
+	APIToken       string `yaml:"api_token"`
+	PublicURL      string `yaml:"public_url"`
+	BackupDir      string `yaml:"backup_dir"`
+	BackupRemote   string `yaml:"backup_remote"`
+	TushareToken   string `yaml:"tushare_token"`
+	SECUserAgent   string `yaml:"sec_user_agent"`
 }
 
 type BudgetConfig struct {
@@ -118,9 +121,11 @@ type FeedConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
-			ListenAddr: "127.0.0.1:8787",
-			DBPath:     "~/.hermes/intel/intel_hub.db",
-			BackupDir:  "~/.hermes/intel/backups",
+			ListenAddr:     "127.0.0.1:8787",
+			CapitalWebAddr: "127.0.0.1:8788",
+			DBPath:         "~/.hermes/intel/intel_hub.db",
+			BackupDir:      "~/.hermes/intel/backups",
+			SECUserAgent:   "InformationHubResearch/1.0 (research@informationhub.app)",
 		},
 		Budget: BudgetConfig{
 			MonthlyCapUSD: 2.80,
@@ -208,6 +213,15 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := envStr("INTEL_LISTEN_ADDR"); v != "" {
 		cfg.Server.ListenAddr = v
+	}
+	if v := envStr("CAPITAL_WEB_ADDR"); v != "" {
+		cfg.Server.CapitalWebAddr = v
+	}
+	if v := envStr("TUSHARE_TOKEN"); v != "" {
+		cfg.Server.TushareToken = v
+	}
+	if v := envStr("SEC_USER_AGENT"); v != "" {
+		cfg.Server.SECUserAgent = v
 	}
 	if v := envStr("INTEL_DB_PATH"); v != "" {
 		cfg.Server.DBPath = v

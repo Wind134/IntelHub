@@ -15,6 +15,10 @@ backups/
 # Build artifacts
 build/
 dist/
+web/node_modules/
+*.tsbuildinfo
+server/internal/capital/webdist/*
+!server/internal/capital/webdist/.gitkeep
 server/intel-hub
 server/intel-hub.exe
 client/build/

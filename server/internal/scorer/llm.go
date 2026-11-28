@@ -22,9 +22,13 @@ import (
 // Client calls OpenAI-compatible chat completion APIs with runtime-switchable 3-slot models
 // completely isolated from Hermes's own chat model configuration.
 type Client struct {
-	mu         sync.RWMutex
-	cfg        config.LLMConfig
-	httpClient *http.Client
+	mu           sync.RWMutex
+	cfg          config.LLMConfig
+	httpClient   *http.Client
+	usageHook    func(model.LLMUsageRecord)
+	quotaMu      sync.Mutex
+	quotaCache   *model.SubscriptionQuota
+	quotaCacheAt time.Time
 }
 
 func NewClient(cfg config.LLMConfig) *Client {
@@ -39,6 +43,170 @@ func NewClient(cfg config.LLMConfig) *Client {
 		cfg:        cfg,
 		httpClient: &http.Client{Timeout: timeout},
 	}
+}
+
+// SetUsageHook registers a persistence callback invoked after each LLM call.
+func (c *Client) SetUsageHook(fn func(model.LLMUsageRecord)) {
+	c.mu.Lock()
+	c.usageHook = fn
+	c.mu.Unlock()
+}
+
+func (c *Client) emitUsage(rec model.LLMUsageRecord) {
+	c.mu.RLock()
+	fn := c.usageHook
+	c.mu.RUnlock()
+	if fn != nil {
+		fn(rec)
+	}
+}
+
+// FetchSubscriptionQuota queries OpenCode Go's live rolling/weekly/monthly usage with a 60s cache.
+func (c *Client) FetchSubscriptionQuota(ctx context.Context, forceRefresh bool) *model.SubscriptionQuota {
+	apiKey, endpoint := c.resolveOpenCodeGoQuotaEndpoint()
+	if apiKey == "" || endpoint == "" {
+		return nil
+	}
+
+	c.quotaMu.Lock()
+	defer c.quotaMu.Unlock()
+
+	if !forceRefresh && c.quotaCache != nil && time.Since(c.quotaCacheAt) < 60*time.Second {
+		cp := *c.quotaCache
+		return &cp
+	}
+
+	qctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(qctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return c.quotaFallback("构建额度请求失败")
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return c.quotaFallback("查询订阅额度超时，请稍后刷新")
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
+	if resp.StatusCode != http.StatusOK {
+		return c.quotaFallback(fmt.Sprintf("订阅额度接口返回 HTTP %d", resp.StatusCode))
+	}
+
+	var raw struct {
+		Usage struct {
+			Rolling *struct {
+				Status   string  `json:"status"`
+				Percent  float64 `json:"percent"`
+				ResetsAt string  `json:"resetsAt"`
+			} `json:"rolling"`
+			Weekly *struct {
+				Status   string  `json:"status"`
+				Percent  float64 `json:"percent"`
+				ResetsAt string  `json:"resetsAt"`
+			} `json:"weekly"`
+			Monthly *struct {
+				Status   string  `json:"status"`
+				Percent  float64 `json:"percent"`
+				ResetsAt string  `json:"resetsAt"`
+			} `json:"monthly"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return c.quotaFallback("解析订阅额度响应失败")
+	}
+
+	toWindow := func(w *struct {
+		Status   string  `json:"status"`
+		Percent  float64 `json:"percent"`
+		ResetsAt string  `json:"resetsAt"`
+	}) *model.QuotaWindow {
+		if w == nil {
+			return nil
+		}
+		used := clampPercent(w.Percent)
+		return &model.QuotaWindow{
+			Status:           w.Status,
+			UsedPercent:      used,
+			RemainingPercent: clampPercent(100 - used),
+			ResetsAt:         w.ResetsAt,
+		}
+	}
+
+	q := &model.SubscriptionQuota{
+		Provider:  "opencode-go",
+		Available: raw.Usage.Rolling != nil || raw.Usage.Weekly != nil || raw.Usage.Monthly != nil,
+		FetchedAt: time.Now().Unix(),
+		Rolling:   toWindow(raw.Usage.Rolling),
+		Weekly:    toWindow(raw.Usage.Weekly),
+		Monthly:   toWindow(raw.Usage.Monthly),
+	}
+	if !q.Available {
+		return c.quotaFallback("订阅额度字段缺失")
+	}
+	c.quotaCache = q
+	c.quotaCacheAt = time.Now()
+	cp := *q
+	return &cp
+}
+
+func (c *Client) quotaFallback(errMsg string) *model.SubscriptionQuota {
+	if c.quotaCache != nil && time.Since(c.quotaCacheAt) < 10*time.Minute {
+		cp := *c.quotaCache
+		cp.Error = errMsg
+		return &cp
+	}
+	return &model.SubscriptionQuota{
+		Provider:  "opencode-go",
+		Available: false,
+		FetchedAt: time.Now().Unix(),
+		Error:     errMsg,
+	}
+}
+
+func (c *Client) resolveOpenCodeGoQuotaEndpoint() (string, string) {
+	c.mu.RLock()
+	provider := strings.ToLower(strings.TrimSpace(c.cfg.Provider))
+	baseURL := strings.TrimSpace(c.cfg.BaseURL)
+	apiKey := strings.TrimSpace(c.cfg.APIKey)
+	presets := append([]config.LLMProviderPreset(nil), c.cfg.Providers...)
+	c.mu.RUnlock()
+
+	if (provider == "opencode-go" || strings.Contains(strings.ToLower(baseURL), "opencode.ai/zen/go")) && apiKey != "" {
+		return apiKey, strings.TrimRight(baseURL, "/") + "/usage"
+	}
+	for _, p := range presets {
+		if strings.EqualFold(p.Name, "opencode-go") || strings.Contains(strings.ToLower(p.BaseURL), "opencode.ai/zen/go") {
+			k := strings.TrimSpace(p.APIKey)
+			if k == "" && p.APIKeyEnv != "" {
+				k = strings.TrimSpace(os.Getenv(p.APIKeyEnv))
+			}
+			if k != "" {
+				b := strings.TrimSpace(p.BaseURL)
+				if b == "" {
+					b = "https://opencode.ai/zen/go/v1"
+				}
+				return k, strings.TrimRight(b, "/") + "/usage"
+			}
+		}
+	}
+	if k := strings.TrimSpace(os.Getenv("OPENCODE_GO_API_KEY")); k != "" {
+		return k, "https://opencode.ai/zen/go/v1/usage"
+	}
+	return "", ""
+}
+
+func clampPercent(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
 }
 
 // GetSelection returns the currently active 3-slot model configuration.
@@ -164,11 +332,16 @@ func (c *Client) ListProviders() []model.ModelProviderCatalog {
 	return out
 }
 
+type streamOpts struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
 type chatReq struct {
-	Model       string    `json:"model"`
-	Messages    []chatMsg `json:"messages"`
-	Temperature float64   `json:"temperature"`
-	Stream      bool      `json:"stream,omitempty"`
+	Model         string      `json:"model"`
+	Messages      []chatMsg   `json:"messages"`
+	Temperature   float64     `json:"temperature"`
+	Stream        bool        `json:"stream,omitempty"`
+	StreamOptions *streamOpts `json:"stream_options,omitempty"`
 }
 
 type chatMsg struct {
@@ -176,20 +349,23 @@ type chatMsg struct {
 	Content string `json:"content"`
 }
 
+type usageStats struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
+}
+
 type chatResp struct {
 	Choices []struct {
 		Message chatMsg `json:"message"`
 	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int64 `json:"prompt_tokens"`
-		CompletionTokens int64 `json:"completion_tokens"`
-		TotalTokens      int64 `json:"total_tokens"`
-	} `json:"usage"`
+	Usage usageStats `json:"usage"`
 }
 
 // ScoreEvent runs L4 fast AI judge scoring. Falls back to heuristic scoring if LLM API key is absent.
 func (c *Client) ScoreEvent(ctx context.Context, item model.RawItem, extraContext string) (model.ScoreResult, int64, error) {
 	c.mu.RLock()
+	provider := c.cfg.Provider
 	apiKey := c.cfg.APIKey
 	baseURL := c.cfg.BaseURL
 	fastModel := c.cfg.FastModel
@@ -206,7 +382,7 @@ func (c *Client) ScoreEvent(ctx context.Context, item model.RawItem, extraContex
 9-10分(P1特急)：重大黑天鹅、美股核心标的剧烈异动(>4%)、美联储意外决议、旗舰基座模型发布/开源、主力AI API大面积宕机、百亿美元并购/反垄断重罚、影响全球供应链的重大冲突或0-day。
 8分(P1重要)：明确高价值突发新闻、重要高管变动、大厂战略转向、核心芯片/AI重要进展。
 5-7分(P2次级)：有价值的行业动态、财报常规解读、普通产品更新，适合归入晚间日报。
-1-4分(噪音)：观点水文、软广、无实质增量的常规报道。`
+1-4分(噪音)：观点水文、软广、无实质增量的常规报道；以及缺乏明确新闻事实与上下文背景的 X/Twitter 简短回复、表情或泛泛感叹（哪怕出自马斯克等名人，无实质增量也必须压低至 1-3 分）。`
 
 	userText := fmt.Sprintf("信源: %s (%s)\n提示领域: %s\n标题: %s\n摘要: %s",
 		item.SourceName, item.SourceType, item.CategoryHint, item.Title, truncateRunes(item.Summary, 600))
@@ -224,14 +400,24 @@ func (c *Client) ScoreEvent(ctx context.Context, item model.RawItem, extraContex
 		if mdl == "" {
 			continue
 		}
-		content, tokens, err := c.completeOnce(ctx, baseURL, apiKey, mdl, "intel-hub-scorer", []chatMsg{
+		msgs := []chatMsg{
 			{Role: "system", Content: sysPrompt},
 			{Role: "user", Content: userText},
-		}, 0.1)
+		}
+		content, usage, estimated, err := c.completeOnce(ctx, baseURL, apiKey, mdl, "intel-hub-scorer", msgs, 0.1)
 		if err != nil {
 			lastErr = err
 			continue
 		}
+		c.emitUsage(model.LLMUsageRecord{
+			Provider:         provider,
+			Model:            mdl,
+			Scene:            "scoring",
+			PromptTokens:     usage.PromptTokens,
+			CompletionTokens: usage.CompletionTokens,
+			TotalTokens:      usage.TotalTokens,
+			Estimated:        estimated,
+		})
 		res, err := parseScoreJSON(content)
 		if err != nil {
 			lastErr = err
@@ -249,16 +435,22 @@ func (c *Client) ScoreEvent(ctx context.Context, item model.RawItem, extraContex
 		if res.ZhTitle == "" {
 			res.ZhTitle = truncateRunes(item.Title, 24)
 		}
-		return res, tokens, nil
+		return res, usage.TotalTokens, nil
 	}
 
 	return heuristicScore(item), 0, fmt.Errorf("llm scoring fallback used: %w", lastErr)
 }
 
-// StreamAsk streams a deep analysis answer (SSE token deltas) with automatic transient retry
-// and graceful model fallback (strong -> fallback -> fast) if upstream fails before first token.
+// StreamAsk streams a deep analysis answer under the default ask_event scene.
 func (c *Client) StreamAsk(ctx context.Context, systemPrompt, userPrompt string, history []model.EventThread, onDelta func(delta string) error) (fullText string, modelUsed string, err error) {
+	return c.StreamAskWithScene(ctx, "ask_event", systemPrompt, userPrompt, history, onDelta)
+}
+
+// StreamAskWithScene streams a deep analysis answer (SSE token deltas) with automatic transient retry,
+// graceful model fallback (strong -> fallback -> fast), and token accounting tagged by scene.
+func (c *Client) StreamAskWithScene(ctx context.Context, scene, systemPrompt, userPrompt string, history []model.EventThread, onDelta func(delta string) error) (fullText string, modelUsed string, err error) {
 	c.mu.RLock()
+	provider := c.cfg.Provider
 	apiKey := c.cfg.APIKey
 	baseURL := c.cfg.BaseURL
 	strongModel := strings.TrimSpace(c.cfg.StrongModel)
@@ -303,6 +495,29 @@ func (c *Client) StreamAsk(ctx context.Context, systemPrompt, userPrompt string,
 		},
 	}
 
+	recordStreamUsage := func(mdl, output string, u usageStats) {
+		estimated := false
+		if u.TotalTokens <= 0 && u.PromptTokens <= 0 && u.CompletionTokens <= 0 {
+			u.PromptTokens = estimateMessagesTokens(msgs)
+			u.CompletionTokens = estimateTextTokens(output)
+			u.TotalTokens = u.PromptTokens + u.CompletionTokens
+			estimated = true
+		} else if u.TotalTokens <= 0 {
+			u.TotalTokens = u.PromptTokens + u.CompletionTokens
+		}
+		if u.TotalTokens > 0 {
+			c.emitUsage(model.LLMUsageRecord{
+				Provider:         provider,
+				Model:            mdl,
+				Scene:            scene,
+				PromptTokens:     u.PromptTokens,
+				CompletionTokens: u.CompletionTokens,
+				TotalTokens:      u.TotalTokens,
+				Estimated:        estimated,
+			})
+		}
+	}
+
 	var lastErr error
 	for idx, mdl := range candidates {
 		// Retry primary model once on transient failure before falling back
@@ -315,15 +530,23 @@ func (c *Client) StreamAsk(ctx context.Context, systemPrompt, userPrompt string,
 				return "", mdl, ctx.Err()
 			}
 			emitted := false
-			text, streamErr := c.streamOnce(ctx, streamClient, baseURL, apiKey, mdl, msgs, func(d string) error {
+			text, usage, streamErr := c.streamOnce(ctx, streamClient, baseURL, apiKey, mdl, msgs, true, func(d string) error {
 				emitted = true
 				return onDelta(d)
 			})
+			// Fallback without stream_options if proxy rejects the field before any tokens flow
+			if streamErr != nil && !emitted && (strings.Contains(streamErr.Error(), "status 400") || strings.Contains(streamErr.Error(), "status 422")) {
+				text, usage, streamErr = c.streamOnce(ctx, streamClient, baseURL, apiKey, mdl, msgs, false, func(d string) error {
+					emitted = true
+					return onDelta(d)
+				})
+			}
 			if streamErr == nil && strings.TrimSpace(text) != "" {
+				recordStreamUsage(mdl, text, usage)
 				return text, mdl, nil
 			}
 			if emitted {
-				// Partial output already reached client; do not restart or duplicate answer.
+				recordStreamUsage(mdl, text, usage)
 				return text, mdl, streamErr
 			}
 			if streamErr != nil {
@@ -343,18 +566,22 @@ func (c *Client) StreamAsk(ctx context.Context, systemPrompt, userPrompt string,
 	return "", candidates[0], lastErr
 }
 
-func (c *Client) streamOnce(ctx context.Context, streamClient *http.Client, baseURL, apiKey, modelName string, msgs []chatMsg, onDelta func(delta string) error) (string, error) {
-	body, _ := json.Marshal(chatReq{
+func (c *Client) streamOnce(ctx context.Context, streamClient *http.Client, baseURL, apiKey, modelName string, msgs []chatMsg, includeUsage bool, onDelta func(delta string) error) (string, usageStats, error) {
+	payload := chatReq{
 		Model:       modelName,
 		Messages:    msgs,
 		Temperature: 0.3,
 		Stream:      true,
-	})
+	}
+	if includeUsage {
+		payload.StreamOptions = &streamOpts{IncludeUsage: true}
+	}
+	body, _ := json.Marshal(payload)
 
 	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", usageStats{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
@@ -365,16 +592,17 @@ func (c *Client) streamOnce(ctx context.Context, streamClient *http.Client, base
 
 	resp, err := streamClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", usageStats{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return "", fmt.Errorf("llm stream status %d (%s): %s", resp.StatusCode, modelName, strings.TrimSpace(string(errBody)))
+		return "", usageStats{}, fmt.Errorf("llm stream status %d (%s): %s", resp.StatusCode, modelName, strings.TrimSpace(string(errBody)))
 	}
 
 	var full strings.Builder
+	var usage usageStats
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -382,9 +610,9 @@ func (c *Client) streamOnce(ctx context.Context, streamClient *http.Client, base
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" || payload == "[DONE]" {
-			if payload == "[DONE]" {
+		dataStr := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if dataStr == "" || dataStr == "[DONE]" {
+			if dataStr == "[DONE]" {
 				break
 			}
 			continue
@@ -393,33 +621,38 @@ func (c *Client) streamOnce(ctx context.Context, streamClient *http.Client, base
 			Error *struct {
 				Message string `json:"message"`
 			} `json:"error"`
+			Usage   *usageStats `json:"usage"`
 			Choices []struct {
 				Delta struct {
 					Content string `json:"content"`
 				} `json:"delta"`
 			} `json:"choices"`
 		}
-		if err := json.Unmarshal([]byte(payload), &chunk); err == nil {
+		if err := json.Unmarshal([]byte(dataStr), &chunk); err == nil {
 			if chunk.Error != nil && chunk.Error.Message != "" {
-				return full.String(), fmt.Errorf("upstream error (%s): %s", modelName, chunk.Error.Message)
+				return full.String(), usage, fmt.Errorf("upstream error (%s): %s", modelName, chunk.Error.Message)
+			}
+			if chunk.Usage != nil && (chunk.Usage.TotalTokens > 0 || chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0) {
+				usage = *chunk.Usage
 			}
 			if len(chunk.Choices) > 0 {
 				delta := chunk.Choices[0].Delta.Content
 				if delta != "" {
 					full.WriteString(delta)
 					if err := onDelta(delta); err != nil {
-						return full.String(), err
+						return full.String(), usage, err
 					}
 				}
 			}
 		}
 	}
-	return full.String(), sc.Err()
+	return full.String(), usage, sc.Err()
 }
 
 // GenerateDailyDigest synthesizes a structured Chinese Markdown executive briefing from pending P2 + P1 items.
 func (c *Client) GenerateDailyDigest(ctx context.Context, dateStr string, p1Events []model.IntelEvent, p2Items []model.DigestItem) (string, string, error) {
 	c.mu.RLock()
+	provider := c.cfg.Provider
 	apiKey := c.cfg.APIKey
 	baseURL := c.cfg.BaseURL
 	mdl := c.cfg.StrongModel
@@ -500,10 +733,30 @@ func (c *Client) GenerateDailyDigest(ctx context.Context, dateStr string, p1Even
 	if len(parsed.Choices) == 0 {
 		return "", mdl, fmt.Errorf("empty choices for digest")
 	}
-	return strings.TrimSpace(parsed.Choices[0].Message.Content), mdl, nil
+	content := strings.TrimSpace(parsed.Choices[0].Message.Content)
+	u := parsed.Usage
+	est := false
+	if u.TotalTokens <= 0 && u.PromptTokens <= 0 && u.CompletionTokens <= 0 {
+		u.PromptTokens = estimateTextTokens(sysPrompt) + estimateTextTokens(sb.String())
+		u.CompletionTokens = estimateTextTokens(content)
+		u.TotalTokens = u.PromptTokens + u.CompletionTokens
+		est = true
+	} else if u.TotalTokens <= 0 {
+		u.TotalTokens = u.PromptTokens + u.CompletionTokens
+	}
+	c.emitUsage(model.LLMUsageRecord{
+		Provider:         provider,
+		Model:            mdl,
+		Scene:            "daily_digest",
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+		TotalTokens:      u.TotalTokens,
+		Estimated:        est,
+	})
+	return content, mdl, nil
 }
 
-func (c *Client) completeOnce(ctx context.Context, baseURL, apiKey, modelName, sessionID string, msgs []chatMsg, temp float64) (string, int64, error) {
+func (c *Client) completeOnce(ctx context.Context, baseURL, apiKey, modelName, sessionID string, msgs []chatMsg, temp float64) (string, usageStats, bool, error) {
 	body, _ := json.Marshal(chatReq{
 		Model:       modelName,
 		Messages:    msgs,
@@ -512,7 +765,7 @@ func (c *Client) completeOnce(ctx context.Context, baseURL, apiKey, modelName, s
 	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", 0, err
+		return "", usageStats{}, false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -522,21 +775,59 @@ func (c *Client) completeOnce(ctx context.Context, baseURL, apiKey, modelName, s
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", 0, err
+		return "", usageStats{}, false, err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if resp.StatusCode >= 300 {
-		return "", 0, fmt.Errorf("status %d: %s", resp.StatusCode, string(raw))
+		return "", usageStats{}, false, fmt.Errorf("status %d: %s", resp.StatusCode, string(raw))
 	}
 	var parsed chatResp
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return "", 0, err
+		return "", usageStats{}, false, err
 	}
 	if len(parsed.Choices) == 0 {
-		return "", 0, fmt.Errorf("empty choices from model %s", modelName)
+		return "", usageStats{}, false, fmt.Errorf("empty choices from model %s", modelName)
 	}
-	return parsed.Choices[0].Message.Content, parsed.Usage.TotalTokens, nil
+	content := parsed.Choices[0].Message.Content
+	u := parsed.Usage
+	estimated := false
+	if u.TotalTokens <= 0 && u.PromptTokens <= 0 && u.CompletionTokens <= 0 {
+		u.PromptTokens = estimateMessagesTokens(msgs)
+		u.CompletionTokens = estimateTextTokens(content)
+		u.TotalTokens = u.PromptTokens + u.CompletionTokens
+		estimated = true
+	} else if u.TotalTokens <= 0 {
+		u.TotalTokens = u.PromptTokens + u.CompletionTokens
+	}
+	return content, u, estimated, nil
+}
+
+func estimateMessagesTokens(msgs []chatMsg) int64 {
+	var total int64
+	for _, m := range msgs {
+		total += 4 + estimateTextTokens(m.Content)
+	}
+	return total
+}
+
+func estimateTextTokens(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	var cjk, ascii int64
+	for _, r := range s {
+		if r >= 0x4E00 && r <= 0x9FFF {
+			cjk++
+		} else {
+			ascii++
+		}
+	}
+	est := (cjk*2+2)/3 + (ascii+3)/4
+	if est < 1 {
+		est = 1
+	}
+	return est
 }
 
 func parseScoreJSON(raw string) (model.ScoreResult, error) {

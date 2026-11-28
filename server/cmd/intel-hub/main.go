@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"intel-hub/internal/api"
+	"intel-hub/internal/capital"
 	"intel-hub/internal/collector"
 	"intel-hub/internal/config"
 	"intel-hub/internal/model"
@@ -108,6 +109,9 @@ func runServe(args []string) {
 
 	hub := api.NewHub()
 	llm := scorer.NewClient(cfg.LLM)
+	llm.SetUsageHook(func(rec model.LLMUsageRecord) {
+		_ = st.RecordLLMUsage(context.Background(), rec)
+	})
 	if saved, err := st.GetSetting(context.Background(), "llm_model_config"); err == nil && saved != "" {
 		var sel model.ModelSelection
 		if err := json.Unmarshal([]byte(saved), &sel); err == nil {
@@ -152,6 +156,36 @@ func runServe(args []string) {
 	// Daily maintenance loop: 21:00 UTC+8 executive digest + 03:30 UTC+8 backup & fingerprint prune.
 	go runMaintenanceLoop(ctx, cfg, st, srv)
 
+	// Capital Flow Web Dashboard (dedicated 127.0.0.1:8788 listener sharing SQLite WAL & encrypted auth)
+	capRepo := capital.NewRepo(st)
+	if err := capRepo.Migrate(); err != nil {
+		log.Fatalf("capital migrate failed: %v", err)
+	}
+	capEngine := capital.NewEngine(capRepo, cfg.Server.TushareToken, cfg.Server.SECUserAgent)
+	capEngine.SetAlertSink(func(ctx context.Context, ev *model.IntelEvent) {
+		saved, err := st.InsertEvent(ctx, ev)
+		if err != nil || saved == nil {
+			return
+		}
+		srv.OnEventCreated(ctx, saved)
+	})
+	capEngine.Start(ctx)
+	var capSrv *http.Server
+	if strings.TrimSpace(cfg.Server.CapitalWebAddr) != "" {
+		capWeb := capital.NewWebServer(cfg, st, capEngine)
+		capSrv = &http.Server{
+			Addr:              cfg.Server.CapitalWebAddr,
+			Handler:           capWeb.Handler(),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() {
+			log.Printf("[capital-web] listening on http://%s (strict login gate enabled)", cfg.Server.CapitalWebAddr)
+			if err := capSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("[capital-web] server error: %v", err)
+			}
+		}()
+	}
+
 	httpSrv := &http.Server{
 		Addr:              cfg.Server.ListenAddr,
 		Handler:           srv.Handler(),
@@ -171,6 +205,9 @@ func runServe(args []string) {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutCtx)
+	if capSrv != nil {
+		_ = capSrv.Shutdown(shutCtx)
+	}
 }
 
 func runMaintenanceLoop(ctx context.Context, cfg *config.Config, st *store.Store, srv *api.Server) {
