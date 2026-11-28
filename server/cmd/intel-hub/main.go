@@ -109,6 +109,9 @@ func runServe(args []string) {
 
 	hub := api.NewHub()
 	llm := scorer.NewClient(cfg.LLM)
+	llm.SetUsageHook(func(rec model.LLMUsageRecord) {
+		_ = st.RecordLLMUsage(context.Background(), rec)
+	})
 	if saved, err := st.GetSetting(context.Background(), "llm_model_config"); err == nil && saved != "" {
 		var sel model.ModelSelection
 		if err := json.Unmarshal([]byte(saved), &sel); err == nil {

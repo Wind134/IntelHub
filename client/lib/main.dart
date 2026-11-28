@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'core/ai_usage_card.dart';
 import 'core/api_client.dart';
 import 'core/app_theme.dart';
 import 'core/auth_screen.dart';
@@ -235,6 +236,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
   String _fallbackModel = 'qwen3.8-flash';
   String _strongModel = 'deepseek-v4-pro';
   bool _savingModels = false;
+  bool _refreshingOverview = false;
 
   // Settings controllers
   final TextEditingController _urlCtrl = TextEditingController();
@@ -1313,11 +1315,16 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     }
   }
 
-  Future<void> _loadOverview() async {
+  Future<void> _loadOverview({bool refreshQuota = false}) async {
+    if (_refreshingOverview) return;
+    if (refreshQuota && mounted) setState(() => _refreshingOverview = true);
     try {
-      final ov = await _api.fetchOverview();
+      final ov = await _api.fetchOverview(refreshQuota: refreshQuota);
       if (mounted) setState(() => _overview = ov);
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      if (refreshQuota && mounted) setState(() => _refreshingOverview = false);
+    }
   }
 
   Future<void> _loadModelSettings() async {
@@ -1354,6 +1361,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('已热同步至后端：初筛 $_fastModel · 兜底 $_fallbackModel · 深度 $_strongModel')),
       );
+      _loadOverview();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('保存模型配置失败：$e')));
@@ -2879,6 +2887,14 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
               ],
             ),
           ),
+        ),
+        const SizedBox(height: 22),
+
+        // 3.5 AI Subscription Quota & Token Ledger
+        AiUsageCard(
+          usage: ov?.llmUsage,
+          refreshing: _refreshingOverview,
+          onRefresh: () => _loadOverview(refreshQuota: true),
         ),
         const SizedBox(height: 22),
 

@@ -132,18 +132,70 @@ type BudgetSummary struct {
 	Providers     []BudgetRecord `json:"providers"`
 }
 
+// LLMUsageRecord represents a single LLM call's token accounting payload.
+type LLMUsageRecord struct {
+	Provider         string `json:"provider"`
+	Model            string `json:"model"`
+	Scene            string `json:"scene"` // scoring | ask_event | ask_history | daily_digest
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
+	TotalTokens      int64  `json:"total_tokens"`
+	Estimated        bool   `json:"estimated"`
+}
+
+// LLMUsageBucket aggregates token counts for a period, day, scene, or model.
+type LLMUsageBucket struct {
+	Key              string `json:"key"`
+	Label            string `json:"label,omitempty"`
+	RequestCount     int64  `json:"request_count"`
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
+	TotalTokens      int64  `json:"total_tokens"`
+	EstimatedCount   int64  `json:"estimated_count"`
+}
+
+// QuotaWindow captures a rolling/weekly/monthly subscription quota window.
+type QuotaWindow struct {
+	Status           string  `json:"status"`
+	UsedPercent      float64 `json:"used_percent"`
+	RemainingPercent float64 `json:"remaining_percent"`
+	ResetsAt         string  `json:"resets_at"`
+}
+
+// SubscriptionQuota exposes live remaining quota from OpenCode Go.
+type SubscriptionQuota struct {
+	Provider  string       `json:"provider"`
+	Available bool         `json:"available"`
+	FetchedAt int64        `json:"fetched_at"`
+	Error     string       `json:"error,omitempty"`
+	Rolling   *QuotaWindow `json:"rolling,omitempty"`
+	Weekly    *QuotaWindow `json:"weekly,omitempty"`
+	Monthly   *QuotaWindow `json:"monthly,omitempty"`
+}
+
+// LLMUsageSummary combines live subscription quota with local token breakdowns.
+type LLMUsageSummary struct {
+	Today   LLMUsageBucket     `json:"today"`
+	Month   LLMUsageBucket     `json:"month"`
+	Daily7d []LLMUsageBucket   `json:"daily_7d"`
+	ByScene []LLMUsageBucket   `json:"by_scene"`
+	ByModel []LLMUsageBucket   `json:"by_model"`
+	Quota   *SubscriptionQuota `json:"quota,omitempty"`
+}
+
 // SystemOverview powers the client dashboard and CLI stats command.
 type SystemOverview struct {
-	TotalEvents       int64         `json:"total_events"`
-	P1Events24h       int64         `json:"p1_events_24h"`
-	BookmarkedEvents  int64         `json:"bookmarked_events"`
-	TotalDigests      int64         `json:"total_digests"`
-	DBSizeBytes       int64         `json:"db_size_bytes"`
-	ActiveWSClients   int           `json:"active_ws_clients"`
-	RegisteredDevices int           `json:"registered_devices"`
-	Sources           []SourceState `json:"sources"`
-	Budget            BudgetSummary `json:"budget"`
-	ServerTime        int64         `json:"server_time"`
+	TotalEvents       int64            `json:"total_events"`
+	P1Events24h       int64            `json:"p1_events_24h"`
+	BookmarkedEvents  int64            `json:"bookmarked_events"`
+	TotalDigests      int64            `json:"total_digests"`
+	DBSizeBytes       int64            `json:"db_size_bytes"`
+	ActiveWSClients   int              `json:"active_ws_clients"`
+	RegisteredDevices int              `json:"registered_devices"`
+	Sources           []SourceState    `json:"sources"`
+	Budget            BudgetSummary    `json:"budget"`
+	LLMUsage          *LLMUsageSummary `json:"llm_usage,omitempty"`
+	ServerTime        int64            `json:"server_time"`
 }
 
 // StreamMessage is broadcast over WebSocket /api/v1/stream to connected clients.

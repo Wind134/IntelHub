@@ -269,6 +269,21 @@ CREATE TABLE IF NOT EXISTS api_budget_ledger (
     UNIQUE(month_key, provider)
 );
 
+CREATE TABLE IF NOT EXISTS llm_usage_daily (
+    usage_date        TEXT NOT NULL,
+    provider          TEXT NOT NULL,
+    model             TEXT NOT NULL,
+    scene             TEXT NOT NULL,
+    request_count     INTEGER NOT NULL DEFAULT 0,
+    prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens      INTEGER NOT NULL DEFAULT 0,
+    estimated_count   INTEGER NOT NULL DEFAULT 0,
+    updated_at        INTEGER NOT NULL,
+    PRIMARY KEY (usage_date, provider, model, scene)
+);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_date ON llm_usage_daily(usage_date DESC);
+
 CREATE TABLE IF NOT EXISTS app_settings (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL,
@@ -1024,7 +1039,169 @@ func (s *Store) GetSystemOverview(ctx context.Context, monthlyCap float64, activ
 	}
 	ov.Sources, _ = s.ListSourceStates(ctx)
 	ov.Budget, _ = s.GetMonthlyBudget(ctx, monthlyCap)
+	if usage, err := s.GetLLMUsageSummary(ctx); err == nil {
+		ov.LLMUsage = &usage
+	}
 	return ov, nil
+}
+
+// RecordLLMUsage upserts daily LLM token consumption by provider, model, and scene.
+func (s *Store) RecordLLMUsage(ctx context.Context, rec model.LLMUsageRecord) error {
+	if rec.TotalTokens <= 0 {
+		rec.TotalTokens = rec.PromptTokens + rec.CompletionTokens
+	}
+	if rec.TotalTokens <= 0 && rec.PromptTokens <= 0 && rec.CompletionTokens <= 0 {
+		return nil
+	}
+	provider := strings.TrimSpace(rec.Provider)
+	if provider == "" {
+		provider = "unknown"
+	}
+	mdl := strings.TrimSpace(rec.Model)
+	if mdl == "" {
+		mdl = "unknown"
+	}
+	scene := strings.TrimSpace(rec.Scene)
+	if scene == "" {
+		scene = "other"
+	}
+	day := time.Now().In(shanghaiLoc).Format("2006-01-02")
+	est := int64(0)
+	if rec.Estimated {
+		est = 1
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err := s.writeDB.ExecContext(ctx, `
+		INSERT INTO llm_usage_daily (
+			usage_date, provider, model, scene,
+			request_count, prompt_tokens, completion_tokens, total_tokens, estimated_count, updated_at
+		) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+		ON CONFLICT(usage_date, provider, model, scene) DO UPDATE SET
+			request_count = llm_usage_daily.request_count + 1,
+			prompt_tokens = llm_usage_daily.prompt_tokens + excluded.prompt_tokens,
+			completion_tokens = llm_usage_daily.completion_tokens + excluded.completion_tokens,
+			total_tokens = llm_usage_daily.total_tokens + excluded.total_tokens,
+			estimated_count = llm_usage_daily.estimated_count + excluded.estimated_count,
+			updated_at = excluded.updated_at
+	`, day, provider, mdl, scene, rec.PromptTokens, rec.CompletionTokens, rec.TotalTokens, est, time.Now().Unix())
+	return err
+}
+
+// GetLLMUsageSummary aggregates today, current month, 7-day trend, and scene/model breakdowns.
+func (s *Store) GetLLMUsageSummary(ctx context.Context) (model.LLMUsageSummary, error) {
+	nowBJ := time.Now().In(shanghaiLoc)
+	today := nowBJ.Format("2006-01-02")
+	monthPrefix := nowBJ.Format("2006-01") + "-%"
+	start7d := nowBJ.AddDate(0, 0, -6).Format("2006-01-02")
+
+	sum := model.LLMUsageSummary{
+		Today:   model.LLMUsageBucket{Key: today, Label: "今日"},
+		Month:   model.LLMUsageBucket{Key: nowBJ.Format("2006-01"), Label: "本月"},
+		Daily7d: make([]model.LLMUsageBucket, 0, 7),
+		ByScene: []model.LLMUsageBucket{},
+		ByModel: []model.LLMUsageBucket{},
+	}
+
+	_ = s.readDB.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(request_count),0), COALESCE(SUM(prompt_tokens),0),
+		       COALESCE(SUM(completion_tokens),0), COALESCE(SUM(total_tokens),0),
+		       COALESCE(SUM(estimated_count),0)
+		FROM llm_usage_daily WHERE usage_date = ?
+	`, today).Scan(
+		&sum.Today.RequestCount, &sum.Today.PromptTokens,
+		&sum.Today.CompletionTokens, &sum.Today.TotalTokens, &sum.Today.EstimatedCount,
+	)
+
+	_ = s.readDB.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(request_count),0), COALESCE(SUM(prompt_tokens),0),
+		       COALESCE(SUM(completion_tokens),0), COALESCE(SUM(total_tokens),0),
+		       COALESCE(SUM(estimated_count),0)
+		FROM llm_usage_daily WHERE usage_date LIKE ?
+	`, monthPrefix).Scan(
+		&sum.Month.RequestCount, &sum.Month.PromptTokens,
+		&sum.Month.CompletionTokens, &sum.Month.TotalTokens, &sum.Month.EstimatedCount,
+	)
+
+	dayMap := make(map[string]model.LLMUsageBucket, 7)
+	if rows, err := s.readDB.QueryContext(ctx, `
+		SELECT usage_date, SUM(request_count), SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens), SUM(estimated_count)
+		FROM llm_usage_daily
+		WHERE usage_date >= ?
+		GROUP BY usage_date
+		ORDER BY usage_date ASC
+	`, start7d); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var b model.LLMUsageBucket
+			if rows.Scan(&b.Key, &b.RequestCount, &b.PromptTokens, &b.CompletionTokens, &b.TotalTokens, &b.EstimatedCount) == nil {
+				dayMap[b.Key] = b
+			}
+		}
+	}
+	for i := 6; i >= 0; i-- {
+		d := nowBJ.AddDate(0, 0, -i)
+		k := d.Format("2006-01-02")
+		if b, ok := dayMap[k]; ok {
+			b.Label = d.Format("01-02")
+			sum.Daily7d = append(sum.Daily7d, b)
+		} else {
+			sum.Daily7d = append(sum.Daily7d, model.LLMUsageBucket{Key: k, Label: d.Format("01-02")})
+		}
+	}
+
+	if rows, err := s.readDB.QueryContext(ctx, `
+		SELECT scene, SUM(request_count), SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens), SUM(estimated_count)
+		FROM llm_usage_daily
+		WHERE usage_date LIKE ?
+		GROUP BY scene
+		ORDER BY SUM(total_tokens) DESC
+	`, monthPrefix); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var b model.LLMUsageBucket
+			if rows.Scan(&b.Key, &b.RequestCount, &b.PromptTokens, &b.CompletionTokens, &b.TotalTokens, &b.EstimatedCount) == nil {
+				b.Label = llmSceneLabel(b.Key)
+				sum.ByScene = append(sum.ByScene, b)
+			}
+		}
+	}
+
+	if rows, err := s.readDB.QueryContext(ctx, `
+		SELECT model, SUM(request_count), SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens), SUM(estimated_count)
+		FROM llm_usage_daily
+		WHERE usage_date LIKE ?
+		GROUP BY model
+		ORDER BY SUM(total_tokens) DESC
+		LIMIT 10
+	`, monthPrefix); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var b model.LLMUsageBucket
+			if rows.Scan(&b.Key, &b.RequestCount, &b.PromptTokens, &b.CompletionTokens, &b.TotalTokens, &b.EstimatedCount) == nil {
+				b.Label = b.Key
+				sum.ByModel = append(sum.ByModel, b)
+			}
+		}
+	}
+
+	return sum, nil
+}
+
+func llmSceneLabel(scene string) string {
+	switch scene {
+	case "scoring":
+		return "情报自动评分"
+	case "ask_event":
+		return "AI 深度追问"
+	case "ask_history":
+		return "历史库研判"
+	case "daily_digest":
+		return "每日内参生成"
+	default:
+		return scene
+	}
 }
 
 // GetSetting retrieves a JSON or string runtime setting by key.
