@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -551,6 +552,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAskEvent streams a deep-dive answer grounded in the target event + optional live web search.
+// Flushes SSE headers and keepalive heartbeats immediately BEFORE search/LLM so mobile/Cloudflare connections never drop.
 func (s *Server) handleAskEvent(w http.ResponseWriter, r *http.Request) {
 	code := r.PathValue("code")
 	ev, err := s.store.GetEventByCode(r.Context(), code)
@@ -568,20 +570,25 @@ func (s *Server) handleAskEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	history, _ := s.store.GetEventThreads(r.Context(), ev.ID)
-	_ = s.store.AppendThreadMessage(r.Context(), ev.ID, "user", req.Question, "")
 
-	var searchNotes string
-	if req.WebSearch && s.enricher != nil && s.enricher.Enabled() {
-		if hits, err := s.enricher.SearchNews(r.Context(), ev.ZhTitle+" "+req.Question); err == nil && len(hits) > 0 {
-			var lines []string
-			for _, h := range hits {
-				lines = append(lines, fmt.Sprintf("- [%s](%s): %s", h.Title, h.URL, h.Snippet))
+	s.streamSSEWithPrep(w, r, func(emitStatus func(string)) (string, string, []model.EventThread, func(string, string)) {
+		var searchNotes string
+		if req.WebSearch && s.enricher != nil && s.enricher.Enabled() {
+			emitStatus("正在联网检索最新信源…")
+			sctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+			hits, serr := s.enricher.SearchNews(sctx, ev.ZhTitle+" "+req.Question)
+			cancel()
+			if serr == nil && len(hits) > 0 {
+				var lines []string
+				for _, h := range hits {
+					lines = append(lines, fmt.Sprintf("- [%s](%s): %s", h.Title, h.URL, h.Snippet))
+				}
+				searchNotes = "\n\n【实时联网检索补充】\n" + strings.Join(lines, "\n")
 			}
-			searchNotes = "\n\n【实时联网检索补充】\n" + strings.Join(lines, "\n")
 		}
-	}
 
-	sysPrompt := fmt.Sprintf(`你是用户的专属金融与科技深度情报官（Hermes 协同引擎）。请基于以下已入库的突发情报给出专业、克制、结构化的中文深度分析（使用 Markdown）。
+		emitStatus("正在连接模型深度研判…")
+		sysPrompt := fmt.Sprintf(`你是用户的专属金融与科技深度情报官。请基于以下已入库的突发情报给出专业、克制、结构化的中文深度分析（使用 Markdown）。
 事件编号：%s
 中文标题：%s
 原始标题：%s
@@ -590,11 +597,14 @@ func (s *Server) handleAskEvent(w http.ResponseWriter, r *http.Request) {
 AI 初评影响：%s
 多源核验状态：%s (%s)
 原文链接：%s%s`,
-		ev.EventCode, ev.ZhTitle, ev.RawTitle, ev.Category, ev.Score, ev.Summary, ev.ImpactAnalysis,
-		ev.VerificationStatus, ev.VerificationNote, ev.CanonicalURL, searchNotes)
+			ev.EventCode, ev.ZhTitle, ev.RawTitle, ev.Category, ev.Score, ev.Summary, ev.ImpactAnalysis,
+			ev.VerificationStatus, ev.VerificationNote, ev.CanonicalURL, searchNotes)
 
-	s.streamSSEAnswer(w, r, sysPrompt, req.Question, history, func(full, modelUsed string) {
-		_ = s.store.AppendThreadMessage(context.Background(), ev.ID, "assistant", full, modelUsed)
+		onDone := func(full, modelUsed string) {
+			_ = s.store.AppendThreadMessage(context.Background(), ev.ID, "user", req.Question, "")
+			_ = s.store.AppendThreadMessage(context.Background(), ev.ID, "assistant", full, modelUsed)
+		}
+		return sysPrompt, req.Question, history, onDone
 	})
 }
 
@@ -611,70 +621,112 @@ func (s *Server) handleAskHistory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "question required"})
 		return
 	}
-	searchQ := strings.TrimSpace(req.Query)
-	if searchQ == "" {
-		searchQ = req.Question
-	}
-	events, _ := s.store.ListEvents(r.Context(), model.EventFilter{
-		Query:  searchQ,
-		Entity: req.Entity,
-		FromTS: req.FromTS,
-		ToTS:   req.ToTS,
-		Sort:   "relevance",
-		Limit:  25,
-	})
-	if len(events) == 0 {
-		// Fallback to recent events in date window if FTS matched nothing directly.
-		events, _ = s.store.ListEvents(r.Context(), model.EventFilter{
+
+	s.streamSSEWithPrep(w, r, func(emitStatus func(string)) (string, string, []model.EventThread, func(string, string)) {
+		emitStatus("正在检索永久历史情报库…")
+		searchQ := strings.TrimSpace(req.Query)
+		if searchQ == "" {
+			searchQ = req.Question
+		}
+		events, _ := s.store.ListEvents(r.Context(), model.EventFilter{
+			Query:  searchQ,
 			Entity: req.Entity,
 			FromTS: req.FromTS,
 			ToTS:   req.ToTS,
-			Sort:   "time_desc",
-			Limit:  20,
+			Sort:   "relevance",
+			Limit:  25,
 		})
-	}
+		if len(events) == 0 {
+			events, _ = s.store.ListEvents(r.Context(), model.EventFilter{
+				Entity: req.Entity,
+				FromTS: req.FromTS,
+				ToTS:   req.ToTS,
+				Sort:   "time_desc",
+				Limit:  20,
+			})
+		}
 
-	shanghai := time.FixedZone("Asia/Shanghai", 8*3600)
-	var ctxLines []string
-	for _, ev := range events {
-		dt := time.Unix(ev.PublishedAt, 0).In(shanghai).Format("2006-01-02 15:04")
-		ctxLines = append(ctxLines, fmt.Sprintf("- [%s] (%s | %d/10 | %s) %s — %s",
-			ev.EventCode, dt, ev.Score, ev.Category, ev.ZhTitle, ev.ImpactAnalysis))
-	}
-	sysPrompt := "你是历史情报复盘分析师。请严格基于以下从用户永久 SQLite 情报库中检索出的历史事件记录回答问题，并在关键结论后标注对应事件编号（如 `[#EVT-...]`）以便溯源。\n\n【历史情报库命中记录】\n" + strings.Join(ctxLines, "\n")
-
-	s.streamSSEAnswer(w, r, sysPrompt, req.Question, nil, nil)
+		shanghai := time.FixedZone("Asia/Shanghai", 8*3600)
+		var ctxLines []string
+		for _, ev := range events {
+			dt := time.Unix(ev.PublishedAt, 0).In(shanghai).Format("2006-01-02 15:04")
+			ctxLines = append(ctxLines, fmt.Sprintf("- [%s] (%s | %d/10 | %s) %s — %s",
+				ev.EventCode, dt, ev.Score, ev.Category, ev.ZhTitle, ev.ImpactAnalysis))
+		}
+		emitStatus("正在生成跨周期历史复盘…")
+		sysPrompt := "你是历史情报复盘分析师。请严格基于以下从用户永久 SQLite 情报库中检索出的历史事件记录回答问题，并在关键结论后标注对应事件编号（如 `[#EVT-...]`）以便溯源。\n\n【历史情报库命中记录】\n" + strings.Join(ctxLines, "\n")
+		return sysPrompt, req.Question, nil, nil
+	})
 }
 
-func (s *Server) streamSSEAnswer(w http.ResponseWriter, r *http.Request, sysPrompt, userPrompt string, history []model.EventThread, onDone func(full, modelUsed string)) {
+func (s *Server) streamSSEWithPrep(
+	w http.ResponseWriter,
+	r *http.Request,
+	prepare func(emitStatus func(string)) (sysPrompt, userPrompt string, history []model.EventThread, onDone func(full, modelUsed string)),
+) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming unsupported"})
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	var writeMu sync.Mutex
+	writeRaw := func(raw string) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_, err := io.WriteString(w, raw)
+		if err == nil {
+			flusher.Flush()
+		}
+		return err
+	}
+	writeData := func(v any) error {
+		chunk, _ := json.Marshal(v)
+		return writeRaw(fmt.Sprintf("data: %s\n\n", chunk))
+	}
+
+	// Immediately flush initial SSE comment so Cloudflare Tunnel / mobile NAT locks the stream open.
+	_ = writeRaw(": connected\n\n")
+
+	// 10s heartbeat ticker prevents idle connection drops during web search or slow LLM TTFT.
+	hbStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbStop:
+				return
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				_ = writeRaw(": keepalive\n\n")
+			}
+		}
+	}()
+	defer close(hbStop)
+
+	sysPrompt, userPrompt, history, onDone := prepare(func(status string) {
+		_ = writeData(map[string]string{"status": status})
+	})
 
 	full, modelUsed, err := s.scorer.StreamAsk(r.Context(), sysPrompt, userPrompt, history, func(delta string) error {
-		chunk, _ := json.Marshal(map[string]string{"delta": delta})
-		_, werr := fmt.Fprintf(w, "data: %s\n\n", chunk)
-		flusher.Flush()
-		return werr
+		return writeData(map[string]string{"delta": delta})
 	})
 	if err != nil {
-		errPayload, _ := json.Marshal(map[string]string{"error": err.Error()})
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", errPayload)
-		flusher.Flush()
+		log.Printf("[ask] stream error (model=%s): %v", modelUsed, err)
+		_ = writeData(map[string]string{"error": err.Error()})
 		return
 	}
 	if onDone != nil && full != "" {
 		onDone(full, modelUsed)
 	}
-	donePayload, _ := json.Marshal(map[string]any{"done": true, "model": modelUsed})
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", donePayload)
-	flusher.Flush()
+	_ = writeData(map[string]any{"done": true, "model": modelUsed})
 }
 
 func parseFilter(r *http.Request) model.EventFilter {

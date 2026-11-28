@@ -228,31 +228,61 @@ class IntelApiClient {
     return data;
   }
 
-  /// Streams SSE token deltas for single-event deep dive or cross-history RAG.
+  /// Streams SSE token deltas using a dedicated fresh HTTP client per request (eliminates
+  /// stale keep-alive socket drops after sleep / Wi-Fi↔5G switch) with automatic 1-time retry.
   Stream<String> streamAsk({
     required String endpointPath,
     required Map<String, dynamic> payload,
+    void Function(String status)? onStatus,
   }) async* {
-    final req = http.Request('POST', Uri.parse('$_cleanBase$endpointPath'));
-    req.headers.addAll(_headers);
-    req.body = jsonEncode(payload);
-    final resp = await _http.send(req);
-    if (resp.statusCode != 200) {
-      throw HttpException('SSE HTTP ${resp.statusCode}');
-    }
-    await for (final line in resp.stream.transform(utf8.decoder).transform(const LineSplitter())) {
-      if (!line.startsWith('data:')) continue;
-      final raw = line.substring(5).trim();
-      if (raw.isEmpty) continue;
+    const maxAttempts = 2;
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+      final streamClient = http.Client();
+      var yieldedAny = false;
       try {
-        final obj = jsonDecode(raw) as Map<String, dynamic>;
-        if (obj['delta'] is String) {
-          yield obj['delta'] as String;
+        final req = http.Request('POST', Uri.parse('$_cleanBase$endpointPath'));
+        req.headers.addAll({
+          ..._headers,
+          'Accept': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'close',
+        });
+        req.body = jsonEncode(payload);
+
+        final resp = await streamClient.send(req).timeout(const Duration(seconds: 30));
+        if (resp.statusCode != 200) {
+          final errBody = await resp.stream.bytesToString().timeout(const Duration(seconds: 5), onTimeout: () => '');
+          throw HttpException('SSE HTTP ${resp.statusCode}${errBody.isNotEmpty ? ": $errBody" : ""}');
         }
-        if (obj['error'] is String) {
-          yield '\n\n⚠️ ${obj['error']}';
+        await for (final line in resp.stream.transform(utf8.decoder).transform(const LineSplitter())) {
+          if (!line.startsWith('data:')) continue;
+          final raw = line.substring(5).trim();
+          if (raw.isEmpty) continue;
+          try {
+            final obj = jsonDecode(raw) as Map<String, dynamic>;
+            if (obj['status'] is String) {
+              onStatus?.call(obj['status'] as String);
+            }
+            if (obj['delta'] is String) {
+              yieldedAny = true;
+              yield obj['delta'] as String;
+            }
+            if (obj['error'] is String) {
+              yieldedAny = true;
+              yield '\n\n⚠️ ${obj['error']}';
+            }
+          } catch (_) {}
         }
-      } catch (_) {}
+        return;
+      } catch (e) {
+        if (yieldedAny || attempt >= maxAttempts) {
+          rethrow;
+        }
+        onStatus?.call('连接波动，正在自动重连重试…');
+        await Future.delayed(const Duration(milliseconds: 1100));
+      } finally {
+        streamClient.close();
+      }
     }
   }
 

@@ -27,7 +27,7 @@ class NativeNotifier {
     try {
       if (Platform.isWindows) {
         await localNotifier.setup(
-          appName: 'IntelHub 突发情报台',
+          appName: 'informationHub',
           shortcutPolicy: ShortcutPolicy.requireCreate,
         );
         _initialized = true;

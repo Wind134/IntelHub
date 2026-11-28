@@ -6,9 +6,9 @@
   #define MyAppVersion "1.0.0"
 #endif
 
-#define MyAppName "IntelHub"
-#define MyAppDisplayName "IntelHub 突发情报台"
-#define MyAppPublisher "IntelHub"
+#define MyAppName "informationHub"
+#define MyAppDisplayName "informationHub"
+#define MyAppPublisher "informationHub"
 #define MyAppExeName "intel_hub_client.exe"
 
 [Setup]
@@ -23,7 +23,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=..\dist
-OutputBaseFilename=IntelHub-Setup-v{#MyAppVersion}-win64
+OutputBaseFilename=informationHub-Setup-v{#MyAppVersion}-win64
 SetupIconFile=..\client\windows\runner\resources\app_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/ultra64
@@ -39,7 +39,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a Desktop shortcut (创建桌面快捷方式)"; GroupDescription: "Additional tasks:"; Flags: checkedonce
-Name: "autostart"; Description: "Launch IntelHub automatically at Windows startup (开机自动启动)"; GroupDescription: "Additional tasks:"; Flags: unchecked
+Name: "autostart"; Description: "Launch informationHub automatically at Windows startup (开机自动启动)"; GroupDescription: "Additional tasks:"; Flags: unchecked
 
 [Files]
 Source: "..\client\build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -49,7 +49,7 @@ Name: "{group}\{#MyAppDisplayName}"; Filename: "{app}\{#MyAppExeName}"; IconFile
 Name: "{autodesktop}\{#MyAppDisplayName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "IntelHub"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "informationHub"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppDisplayName} now (立即启动)"; Flags: nowait postinstall skipifsilent

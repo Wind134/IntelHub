@@ -35,7 +35,7 @@ class IntelKeepAliveService : Service() {
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_intel)
-            .setContentTitle("IntelHub 实时守护中")
+            .setContentTitle("informationHub 实时守护中")
             .setContentText(statusText)
             .setOngoing(true)
             .setSilent(true)
