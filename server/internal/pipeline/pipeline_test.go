@@ -17,6 +17,10 @@ func TestCanonicalizeURLAndT2S(t *testing.T) {
 	if zh != "美国联准会宣布紧急降息，英伟达股价暴涨" {
 		t.Fatalf("unexpected t2s output: %s", zh)
 	}
+	sum := CleanSummaryText("<p>第一段內容。</p><p>第二段<br/>換行測試。</p>", true)
+	if sum != "第一段内容。\n\n第二段\n换行测试。" {
+		t.Fatalf("unexpected CleanSummaryText output: %q", sum)
+	}
 }
 
 func TestSimHashNearDuplicate(t *testing.T) {

@@ -54,7 +54,7 @@ func (e *Engine) ProcessBatch(ctx context.Context, items []model.RawItem) {
 func (e *Engine) ProcessOne(ctx context.Context, raw model.RawItem) *model.IntelEvent {
 	// L1: Normalize text, canonicalize URL, convert Traditional Chinese if flagged.
 	raw.Title = CleanText(raw.Title, raw.TraditionalZh)
-	raw.Summary = CleanText(raw.Summary, raw.TraditionalZh)
+	raw.Summary = CleanSummaryText(raw.Summary, raw.TraditionalZh)
 	raw.URL = CanonicalizeURL(raw.URL)
 	if raw.Title == "" {
 		return nil
@@ -137,7 +137,7 @@ func (e *Engine) ProcessOne(ctx context.Context, raw model.RawItem) *model.Intel
 		Category:           scored.Category,
 		RawTitle:           raw.Title,
 		ZhTitle:            scored.ZhTitle,
-		Summary:            truncateStr(raw.Summary, 1000),
+		Summary:            truncateStr(raw.Summary, 1600),
 		ImpactAnalysis:     scored.Impact,
 		CanonicalURL:       raw.URL,
 		Entities:           scored.Entities,

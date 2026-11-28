@@ -12,8 +12,13 @@ import (
 )
 
 var (
+	htmlBreakRe  = regexp.MustCompile(`(?i)<\s*br\s*/?\s*>`)
+	htmlBlockRe  = regexp.MustCompile(`(?i)</\s*(p|div|li|h[1-6]|blockquote|tr|section|article)\s*>`)
+	htmlListRe   = regexp.MustCompile(`(?i)<\s*li[^>]*>`)
 	htmlTagRe    = regexp.MustCompile(`<[^>]+>`)
 	multiSpaceRe = regexp.MustCompile(`\s+`)
+	horizSpaceRe = regexp.MustCompile(`[ \t\f\v]+`)
+	multiBlankRe = regexp.MustCompile(`\n{3,}`)
 	dropParams   = map[string]bool{
 		"utm_source": true, "utm_medium": true, "utm_campaign": true,
 		"utm_term": true, "utm_content": true, "utm_id": true,
@@ -22,11 +27,41 @@ var (
 	}
 )
 
-// CleanText strips HTML tags, unescapes entities, collapses whitespace, and optionally converts Traditional Chinese.
+// CleanText strips HTML tags, unescapes entities, collapses whitespace into a single line, and optionally converts Traditional Chinese.
 func CleanText(s string, convertT2S bool) string {
 	s = htmlTagRe.ReplaceAllString(s, " ")
 	s = html.UnescapeString(s)
 	s = multiSpaceRe.ReplaceAllString(strings.TrimSpace(s), " ")
+	if convertT2S {
+		s = TraditionalToSimplified(s)
+	}
+	return s
+}
+
+// CleanSummaryText strips HTML while preserving natural paragraph breaks (<p>, <br>, <div>, <li>) for clean reading.
+func CleanSummaryText(s string, convertT2S bool) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	s = htmlListRe.ReplaceAllString(s, "\n• ")
+	s = htmlBreakRe.ReplaceAllString(s, "\n")
+	s = htmlBlockRe.ReplaceAllString(s, "\n\n")
+	s = htmlTagRe.ReplaceAllString(s, "")
+	s = html.UnescapeString(s)
+
+	lines := strings.Split(s, "\n")
+	cleaned := make([]string, 0, len(lines))
+	for _, line := range lines {
+		l := strings.TrimSpace(horizSpaceRe.ReplaceAllString(line, " "))
+		if l == "" {
+			if len(cleaned) > 0 && cleaned[len(cleaned)-1] != "" {
+				cleaned = append(cleaned, "")
+			}
+			continue
+		}
+		cleaned = append(cleaned, l)
+	}
+	s = strings.TrimSpace(strings.Join(cleaned, "\n"))
+	s = multiBlankRe.ReplaceAllString(s, "\n\n")
 	if convertT2S {
 		s = TraditionalToSimplified(s)
 	}
@@ -164,7 +199,7 @@ var t2sMap = map[rune]rune{
 	'醫': '医', '藥': '药', '釋': '释', '鐵': '铁', '銅': '铜', '銷': '销', '門': '门', '陽': '阳',
 	'陰': '阴', '陸': '陆', '雲': '云', '韓': '韩', '頁': '页', '項': '项', '順': '顺', '頭': '头',
 	'額': '额', '風': '风', '飛': '飞', '馬': '马', '驗': '验', '黨': '党', '齊': '齐', '龍': '龙',
-	'偉': '伟', '準': '准', '宣': '宣', '佈': '布',
+	'偉': '伟', '準': '准', '宣': '宣', '佈': '布', '內': '内', '換': '换', '試': '试',
 }
 
 func TraditionalToSimplified(s string) string {

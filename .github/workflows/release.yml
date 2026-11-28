@@ -67,6 +67,8 @@ jobs:
       - name: Build Flutter Windows Release
         working-directory: client
         shell: pwsh
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         run: |
           flutter pub get
           flutter build windows --release `

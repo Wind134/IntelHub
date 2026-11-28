@@ -15,6 +15,7 @@ import 'core/app_theme.dart';
 import 'core/fluid_motion.dart';
 import 'core/markdown_view.dart';
 import 'core/models.dart';
+import 'core/summary_reader.dart';
 import 'core/updater.dart';
 import 'platform/fcm_service.dart';
 import 'platform/native_notifier.dart';
@@ -160,6 +161,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
   String _fcmToken = '';
   bool _serverFcmEnabled = false;
   bool _testingFcm = false;
+  bool _retryingFcm = false;
   double _detectedRefreshHz = 60.0;
 
   // Server-wide Notification Policy (hot-synced to backend)
@@ -468,10 +470,41 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
     } catch (_) {}
   }
 
+  Future<void> _retryFcmToken({bool showFeedback = true}) async {
+    if (!Platform.isAndroid || _retryingFcm) return;
+    setState(() => _retryingFcm = true);
+    try {
+      final tok = await FcmService.instance.fetchOrRefreshToken(
+        onToken: (t) {
+          _fcmToken = t;
+          if (mounted) setState(() {});
+        },
+      );
+      if (tok != null && tok.isNotEmpty) {
+        _fcmToken = tok;
+        await _syncDeviceToServer();
+        if (mounted && showFeedback) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Android FCM 设备 Token 已获取并同步至服务端！')),
+          );
+        }
+      } else if (mounted && showFeedback) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(FcmService.instance.statusNote), duration: const Duration(seconds: 5)),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _retryingFcm = false);
+    }
+  }
+
   Future<void> _testFcmPush({int delaySec = 5}) async {
     if (_testingFcm) return;
     setState(() => _testingFcm = true);
     try {
+      if (Platform.isAndroid && _fcmToken.isEmpty) {
+        await _retryFcmToken(showFeedback: false);
+      }
       await _syncDeviceToServer();
       await _api.testFcmPush(deviceId: _deviceId, delaySec: delaySec);
       if (!mounted) return;
@@ -1134,6 +1167,9 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
       } else {
         await NativeNotifier.instance.stopAndroidKeepAlive();
       }
+    }
+    if (Platform.isAndroid && _fcmToken.isEmpty) {
+      await _retryFcmToken(showFeedback: false);
     }
     await Future.wait([
       _refreshLiveEvents(),
@@ -1903,7 +1939,7 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                 ),
               ],
               const SizedBox(height: 16),
-              SelectableText(ev.summary, style: Theme.of(context).textTheme.bodyLarge),
+              IntelSummaryReader(summary: ev.summary, sourceName: ev.sourceName),
               if (ev.entities.isNotEmpty) ...[
                 const SizedBox(height: 18),
                 Wrap(
@@ -2561,6 +2597,13 @@ class _IntelShellPageState extends State<IntelShellPage> with WindowListener, Wi
                             style: Theme.of(context).textTheme.bodySmall,
                           ),
                         ),
+                        if (_fcmToken.isEmpty) ...[
+                          const SizedBox(width: 8),
+                          TextButton(
+                            onPressed: _retryingFcm ? null : () => _retryFcmToken(showFeedback: true),
+                            child: Text(_retryingFcm ? '获取中…' : '重新获取 Token'),
+                          ),
+                        ],
                       ],
                     ),
                   ),
