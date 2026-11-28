@@ -332,7 +332,7 @@ export const CNMarketView: React.FC<Props> = ({ dark, refreshTick }) => {
           <div className="flex items-center justify-between gap-1 text-xs text-slate-500 dark:text-slate-400">
             <span className="truncate">放量异动信号</span>
             <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300 whitespace-nowrap">
-              盘中5分钟
+              盘中1分钟
             </span>
           </div>
           <div className="mt-1.5 text-lg sm:text-xl font-bold tabular-nums tracking-tight">

@@ -110,11 +110,7 @@ func ElapsedCNTradingMinutes(now time.Time) (int, bool) {
 	minOfDay := bj.Hour()*60 + bj.Minute()
 	// 上午 09:30 (570) - 11:30 (690)
 	if minOfDay >= 570 && minOfDay <= 690 {
-		m := minOfDay - 570
-		if m < 5 {
-			m = 5
-		}
-		return m, true
+		return minOfDay - 570, true
 	}
 	// 午休 11:31 - 12:59 不再轮询上游，静默等待下午开盘
 	if minOfDay > 690 && minOfDay < 780 {
@@ -142,9 +138,22 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 		return nil
 	}
 
-	// 1. 批量拉取东财精确总份额 f38 + 实时价 f2 + 成交额 f6（盘中仅发这 1 次批量请求）
+	// 1. 批量拉取东财精确总份额 f38 + 实时价 f2 + 成交额 f6（盘中仅发这 1 次批量请求；失败自动降级腾讯全球 CDN）
 	c.report(5, 100, "拉取实时行情与官方份额...")
 	emMap, err := c.fetchEastmoneyQuotes(ctx, watches)
+	if (err != nil || len(emMap) == 0) && intradayOnly {
+		if txMap, txErr := c.fetchTencentQuotes(ctx, watches); txErr == nil && len(txMap) > 0 {
+			emMap = make(map[string]emQuote, len(txMap))
+			for code, tq := range txMap {
+				sh := 0.0
+				if tq.Close > 0 && tq.MktCapYi > 0 {
+					sh = (tq.MktCapYi * 1e8) / tq.Close
+				}
+				emMap[code] = emQuote{Close: tq.Close, TurnoverRMB: tq.TurnoverRMB, Shares: sh}
+			}
+			err = nil
+		}
+	}
 	if err != nil {
 		if !intradayOnly {
 			c.repo.SetSyncStatus(ctx, SyncStatus{Market: "cn_etf", Status: "error", ErrorMsg: err.Error(), SourceLabel: "SSE/东财/腾讯双源"})
@@ -182,8 +191,13 @@ func (c *CNCollector) SyncAll(ctx context.Context, intradayOnly bool) error {
 			if len(prevTurnovers) > 20 {
 				prevTurnovers = prevTurnovers[len(prevTurnovers)-20:]
 			}
-			volRatio := ComputeVolRatio20(em.TurnoverRMB, prevTurnovers, elapsedMin)
-			sig := ClassifyVolumeSignal(volRatio, 0, true)
+			// 开盘前 5 分钟（09:30-09:34）集合竞价成交天然偏高，仅刷新价格成交额，不触发放量假警报
+			volRatio := 0.0
+			sig := "normal"
+			if elapsedMin >= 5 {
+				volRatio = ComputeVolRatio20(em.TurnoverRMB, prevTurnovers, elapsedMin)
+				sig = ClassifyVolumeSignal(volRatio, 0, true)
+			}
 			updates = append(updates, CNETFDaily{
 				Code:          w.Code,
 				TradeDate:     todayBJ,
@@ -420,8 +434,9 @@ func (c *CNCollector) fetchEastmoneyQuotes(ctx context.Context, watches []WatchI
 }
 
 type txQuote struct {
-	Close    float64
-	MktCapYi float64
+	Close       float64
+	TurnoverRMB float64
+	MktCapYi    float64
 }
 
 func (c *CNCollector) fetchTencentQuotes(ctx context.Context, watches []WatchItem) (map[string]txQuote, error) {
@@ -449,9 +464,10 @@ func (c *CNCollector) fetchTencentQuotes(ctx context.Context, watches []WatchIte
 		}
 		code := strings.TrimSpace(parts[2])
 		cl, _ := strconv.ParseFloat(parts[3], 64)
+		toWan, _ := strconv.ParseFloat(parts[37], 64)
 		mc, _ := strconv.ParseFloat(parts[45], 64)
 		if code != "" && cl > 0 {
-			out[code] = txQuote{Close: cl, MktCapYi: mc}
+			out[code] = txQuote{Close: cl, TurnoverRMB: toWan * 10000.0, MktCapYi: mc}
 		}
 	}
 	return out, nil

@@ -178,11 +178,13 @@ func (e *Engine) Start(ctx context.Context) {
 
 	// 定时错峰巡检：A股/港股严格按北京时间(UTC+8)，美股严格按美东时间(America/New_York，自动适配夏/冬令时)
 	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
 		lastCNSlot := ""
 		lastHK := ""
 		lastUSSlot := ""
+		intradayFails := 0
+		var intradayCooldownUntil time.Time
 		for {
 			select {
 			case <-ctx.Done():
@@ -192,9 +194,18 @@ func (e *Engine) Start(ctx context.Context) {
 				nowBJ := now.In(shanghaiTZ)
 				todayBJ := nowBJ.Format("2006-01-02")
 
-				// 1. A股（北京时间，周一至周五）：盘中 09:35-11:30 & 13:00-15:00 每 5 分钟轻量量比观测（仅 1 次批量请求）
+				// 1. A股（北京时间，周一至周五）：盘中 09:30-11:30 & 13:00-15:00 每 1 分钟轻量量比观测（仅 1 次批量请求，失败自动退避 5 分钟）
 				if _, intraday := ElapsedCNTradingMinutes(now); intraday {
-					_ = e.CN.SyncAll(ctx, true)
+					if now.After(intradayCooldownUntil) {
+						if err := e.CN.SyncAll(ctx, true); err != nil {
+							intradayFails++
+							if intradayFails >= 2 {
+								intradayCooldownUntil = now.Add(5 * time.Minute)
+							}
+						} else {
+							intradayFails = 0
+						}
+					}
 				}
 				if isWeekday(nowBJ) {
 					// A股晨间 08:45 复核深交所/Tushare 隔夜终值 + 盘后 19:30 / 21:30 三源核验

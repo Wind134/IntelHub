@@ -27,7 +27,7 @@ const SYNC_NAMES: Record<string, string> = {
 };
 
 const SYNC_SCHEDULES: Record<string, string> = {
-  cn_etf: '北京时间：盘中5分钟量比 · 19:30/21:30/次晨08:45 份额定稿',
+  cn_etf: '北京时间：盘中1分钟量比(东财+腾讯CDN兜底) · 19:30/21:30/次晨08:45 份额定稿',
   us_13f: '美东时间 (ET)：周一至周五 08:30 & 18:15 自动巡检（自动适配夏/冬令时）',
   hk_flow: '北京时间：周一至周五 20:30 同步 T+2 交收快照',
 };
